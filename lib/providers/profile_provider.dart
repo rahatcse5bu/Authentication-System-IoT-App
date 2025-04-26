@@ -39,12 +39,16 @@ class ProfileProvider with ChangeNotifier {
   }
   
   Future<bool> createProfile(Profile profile, File imageFile) async {
+    debugPrint('ProfileProvider.createProfile: Starting profile creation');
     _isLoading = true;
     _error = null;
     notifyListeners();
     
     try {
+      debugPrint('ProfileProvider.createProfile: Calling ApiService.createProfile');
       final newProfile = await ApiService.createProfile(profile, imageFile);
+      
+      debugPrint('ProfileProvider.createProfile: Profile created successfully, adding to list');
       _profiles.add(newProfile);
       _isLoading = false;
       notifyListeners();
@@ -52,6 +56,7 @@ class ProfileProvider with ChangeNotifier {
     } catch (e) {
       _isLoading = false;
       _error = e.toString();
+      debugPrint('ProfileProvider.createProfile error: $_error');
       notifyListeners();
       return false;
     }

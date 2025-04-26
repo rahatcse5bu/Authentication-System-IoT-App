@@ -5,6 +5,7 @@ import 'package:attendance/models/profile.dart';
 import 'package:attendance/providers/profile_provider.dart';
 import 'package:attendance/services/api_service.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 
 class ProfileEditScreen extends StatefulWidget {
   final Profile? profile;
@@ -52,14 +53,39 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
   Future<void> _pickImage(ImageSource source) async {
     try {
       final picker = ImagePicker();
-      final pickedFile = await picker.pickImage(source: source);
+      final pickedFile = await picker.pickImage(
+        source: source,
+        maxWidth: 800,
+        maxHeight: 800,
+        imageQuality: 85,
+      );
       
       if (pickedFile != null) {
-        setState(() {
-          _imageFile = File(pickedFile.path);
-        });
+        final File imageFile = File(pickedFile.path);
+        debugPrint('Image picked from: ${imageFile.path}');
+        
+        // Verify file exists and has content
+        if (await imageFile.exists()) {
+          final size = await imageFile.length();
+          debugPrint('Image size: $size bytes');
+          
+          if (size > 0) {
+            setState(() {
+              _imageFile = imageFile;
+            });
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Selected image is empty')),
+            );
+          }
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not access the selected image')),
+          );
+        }
       }
     } catch (e) {
+      debugPrint('Error picking image: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error picking image: $e')),
       );
@@ -72,17 +98,41 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
         _isProcessing = true;
       });
       
-      final imageFile = await ApiService.captureImage();
+      final File imageFile = await ApiService.captureImage();
+      debugPrint('ESP32 image captured to: ${imageFile.path}');
       
-      setState(() {
-        _imageFile = imageFile;
-        _isProcessing = false;
-      });
+      // Verify file exists and has content
+      if (await imageFile.exists()) {
+        final size = await imageFile.length();
+        debugPrint('ESP32 image size: $size bytes');
+        
+        if (size > 0) {
+          setState(() {
+            _imageFile = imageFile;
+            _isProcessing = false;
+          });
+        } else {
+          setState(() {
+            _isProcessing = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Captured image is empty')),
+          );
+        }
+      } else {
+        setState(() {
+          _isProcessing = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not access the captured image')),
+        );
+      }
     } catch (e) {
       setState(() {
         _isProcessing = false;
       });
       
+      debugPrint('Error capturing ESP32 image: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error capturing image: $e')),
       );
@@ -101,6 +151,34 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       return;
     }
     
+    // Check if image file exists
+    if (_imageFile != null) {
+      try {
+        if (!await _imageFile!.exists()) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Image file not found: ${_imageFile!.path}')),
+          );
+          return;
+        }
+        
+        final size = await _imageFile!.length();
+        debugPrint('Image file size: $size bytes');
+        
+        if (size == 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Image file is empty. Please select another image.')),
+          );
+          return;
+        }
+      } catch (e) {
+        debugPrint('Error checking image file: $e');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error with image file: $e')),
+        );
+        return;
+      }
+    }
+    
     setState(() {
       _isProcessing = true;
     });
@@ -110,6 +188,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
       
       if (widget.profile == null) {
         // Create new profile
+        debugPrint('ProfileEditScreen: Creating new profile');
         final newProfile = Profile(
           id: '', // Will be assigned by backend
           name: _nameController.text,
@@ -121,16 +200,24 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           registrationDate: DateTime.now(),
         );
         
+        debugPrint('ProfileEditScreen: Calling profileProvider.createProfile');
         final success = await profileProvider.createProfile(newProfile, _imageFile!);
         
         if (success) {
+          debugPrint('ProfileEditScreen: Profile created successfully');
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Profile created successfully')),
           );
           Navigator.pop(context);
+        } else {
+          debugPrint('ProfileEditScreen: Profile creation failed');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to create profile: ${profileProvider.error}')),
+          );
         }
       } else {
         // Update existing profile
+        debugPrint('ProfileEditScreen: Updating existing profile ${widget.profile!.id}');
         final updatedProfile = widget.profile!.copyWith(
           name: _nameController.text,
           email: _emailController.text,
@@ -139,19 +226,27 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           university: _universityController.text,
         );
         
+        debugPrint('ProfileEditScreen: Calling profileProvider.updateProfile');
         final success = await profileProvider.updateProfile(
           updatedProfile, 
           imageFile: _imageFile,
         );
         
         if (success) {
+          debugPrint('ProfileEditScreen: Profile updated successfully');
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Profile updated successfully')),
           );
           Navigator.pop(context);
+        } else {
+          debugPrint('ProfileEditScreen: Profile update failed');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to update profile: ${profileProvider.error}')),
+          );
         }
       }
     } catch (e) {
+      debugPrint('ProfileEditScreen error: $e');
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error: $e')),
       );

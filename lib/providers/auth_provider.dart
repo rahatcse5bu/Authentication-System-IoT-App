@@ -25,18 +25,28 @@ class AuthProvider with ChangeNotifier {
   }
   
   Future<bool> login(String username, String password) async {
+    debugPrint('AuthProvider.login: Attempting login with $username');
     try {
       final data = await ApiService.login(username, password);
-      _isLoggedIn = true;
-      _username = username;
       
-      // Save username
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('username', username);
-      
-      notifyListeners();
-      return true;
+      // Check if we actually got a token
+      if (data['access'] != null && data['access'].toString().isNotEmpty) {
+        _isLoggedIn = true;
+        _username = username;
+        
+        // Save username
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('username', username);
+        
+        debugPrint('AuthProvider.login: Login successful');
+        notifyListeners();
+        return true;
+      } else {
+        debugPrint('AuthProvider.login: No token received');
+        return false;
+      }
     } catch (e) {
+      debugPrint('AuthProvider.login error: $e');
       return false;
     }
   }

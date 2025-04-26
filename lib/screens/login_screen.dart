@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:http/http.dart' as http;
 
 import '../providers/auth_provider.dart';
+import '../utils/constants.dart';
 
 class LoginScreen extends StatefulWidget {
   @override
@@ -37,19 +39,49 @@ class _LoginScreenState extends State<LoginScreen> {
       final success = await Provider.of<AuthProvider>(context, listen: false)
           .login(_usernameController.text, _passwordController.text);
       
-      // if (!success && mounted) {
-        setState(() {
-          _errorMessage = 'Invalid username or password';
-          _isLoading = false;
-        });
-      // }
+      if (mounted) {
+        if (!success) {
+          setState(() {
+            _errorMessage = 'Invalid username or password';
+            _isLoading = false;
+          });
+        } else {
+          // Login successful, setState just to clear loading state
+          setState(() {
+            _isLoading = false;
+          });
+        }
+      }
     } catch (e) {
       if (mounted) {
         setState(() {
-          _errorMessage = e.toString();
+          _errorMessage = 'Error: ${e.toString()}';
           _isLoading = false;
         });
       }
+    }
+  }
+  
+  Future<void> _testConnection() async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = 'Testing connection...';
+      });
+      
+      final response = await http.get(
+        Uri.parse('${Constants.baseApiUrl}/settings/health_check/'),
+      );
+      
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'Connection test: Status ${response.statusCode}, Body: ${response.body}';
+      });
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'Connection error: ${e.toString()}';
+      });
     }
   }
   
@@ -179,7 +211,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        'admin / admin123',
+                        'admin / admin',
                         style: TextStyle(
                           color: Theme.of(context).primaryColor,
                           fontWeight: FontWeight.bold,
@@ -188,6 +220,12 @@ class _LoginScreenState extends State<LoginScreen> {
                     ],
                   ),
                   const SizedBox(height: 16),
+                  // Debug button for testing connection
+                  OutlinedButton(
+                    onPressed: _testConnection,
+                    child: const Text('Test API Connection'),
+                  ),
+                  const SizedBox(height: 8),
                   // Version info
                   Text(
                     'v1.0.0',

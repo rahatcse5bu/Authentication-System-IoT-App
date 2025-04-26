@@ -17,25 +17,25 @@ class Attendance {
 
   factory Attendance.fromJson(Map<String, dynamic> json) {
     return Attendance(
-      id: json['_id'],
-      profileId: json['profileId'],
-      profileName: json['profileName'],
+      id: json['id'].toString(),
+      profileId: json['profile'].toString(),
+      profileName: json['profile_name'],
       date: DateTime.parse(json['date']),
-      timeIn: DateTime.parse(json['timeIn']),
-      timeOut: json['timeOut'] != null ? DateTime.parse(json['timeOut']) : null,
+      timeIn: DateTime.parse(json['time_in']),
+      timeOut: json['time_out'] != null ? DateTime.parse(json['time_out']) : null,
     );
   }
 
   Map<String, dynamic> toJson() {
     final data = {
-      'profileId': profileId,
-      'profileName': profileName,
+      'profile': profileId,
+      'profile_name': profileName,
       'date': date.toIso8601String(),
-      'timeIn': timeIn.toIso8601String(),
+      'time_in': timeIn.toIso8601String(),
     };
     
     if (timeOut != null) {
-      data['timeOut'] = timeOut!.toIso8601String();
+      data['time_out'] = timeOut!.toIso8601String();
     }
     
     return data;

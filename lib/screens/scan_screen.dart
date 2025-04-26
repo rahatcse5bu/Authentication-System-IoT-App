@@ -85,10 +85,9 @@ class _ScanScreenState extends State<ScanScreen> {
       });
       
       // Call the API to mark attendance with face recognition
-      // Using the correct method that returns a Map
       final result = await ApiService.markAttendanceWithFaceRecognition();
       
-      if (result['results'] != null && result['results'].isNotEmpty) {
+      if (result.containsKey('results') && result['results'] is List && (result['results'] as List).isNotEmpty) {
         // Add recognized profiles to the list
         for (var profile in result['results']) {
           // Check if profile is already in the list
@@ -128,10 +127,9 @@ class _ScanScreenState extends State<ScanScreen> {
       });
       
       // Process a single attendance scan
-      // Using the correct method that returns a Map
       final result = await ApiService.markAttendanceWithFaceRecognition();
       
-      if (result['results'] != null && result['results'].isNotEmpty) {
+      if (result.containsKey('results') && result['results'] is List && (result['results'] as List).isNotEmpty) {
         // Add recognized profiles to the list
         for (var profile in result['results']) {
           // Check if profile is already in the list

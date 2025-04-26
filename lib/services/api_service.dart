@@ -5,13 +5,15 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/attendance.dart';
 import '../models/profile.dart';
+import '../utils/constants.dart';
 
 class ApiService {
-  static const String _baseUrl = 'http://127.0.0.1:8000/api';
+  static String get _baseUrl => Constants.baseApiUrl;
   static String? _token;
   static String? _esp32Url;
 
@@ -33,24 +35,35 @@ class ApiService {
 
   // Authentication
   static Future<Map<String, dynamic>> login(String username, String password) async {
-    final response = await http.post(
-      Uri.parse('$_baseUrl/token/'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'username': username, 'password': password}),
-    );
-debugPrint('Login response: ${response.body}');
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      _token = data['access'];
+    debugPrint('Attempting login with username: $username');
+    try {
+      final response = await http.post(
+        Uri.parse('$_baseUrl/token/'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'username': username, 'password': password}),
+      );
       
-      // Save token
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('auth_token', _token!);
-      await prefs.setString('username', username);
+      debugPrint('Login response status code: ${response.statusCode}');
+      debugPrint('Login response body: ${response.body}');
       
-      return data;
-    } else {
-      throw Exception('Failed to login: ${response.body}');
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _token = data['access'];
+        debugPrint('Login successful, token received');
+        
+        // Save token
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('auth_token', _token!);
+        await prefs.setString('username', username);
+        
+        return data;
+      } else {
+        debugPrint('Login failed with status code: ${response.statusCode}');
+        throw Exception('Failed to login: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('Login error: $e');
+      throw Exception('Login error: $e');
     }
   }
 
@@ -90,39 +103,75 @@ debugPrint('Login response: ${response.body}');
   }
 
   static Future<Profile> createProfile(Profile profile, File imageFile) async {
-    // Create multipart request for the profile with image
-    var request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/profiles/register_with_face/'));
-    
-    // Add auth headers
-    request.headers.addAll(_getAuthHeaders());
-    
-    // Add profile data
-    request.fields['name'] = profile.name;
-    request.fields['email'] = profile.email;
-    request.fields['blood_group'] = profile.bloodGroup;
-    request.fields['reg_number'] = profile.regNumber;
-    request.fields['university'] = profile.university;
-    
-    // Check if using ESP32
-    if (_esp32Url != null && _esp32Url!.isNotEmpty) {
-      request.fields['use_esp32'] = 'true';
-      request.fields['esp32_url'] = _esp32Url!;
-    } else {
-      // Add image
-      request.files.add(await http.MultipartFile.fromPath(
-        'image', 
-        imageFile.path,
-      ));
-    }
-    
-    // Send request
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
-    
-    if (response.statusCode == 201) {
-      return Profile.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to create profile: ${response.body}');
+    debugPrint('createProfile: Starting profile creation');
+    try {
+      // Check if the file exists before attempting to upload
+      if (!await imageFile.exists()) {
+        throw Exception('Image file does not exist at path: ${imageFile.path}');
+      }
+      
+      debugPrint('createProfile: Image file exists at ${imageFile.path}, size: ${await imageFile.length()} bytes');
+      
+      // Create multipart request for the profile with image
+      var request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/profiles/register_with_face/'));
+      
+      // Add auth headers
+      final headers = _getAuthHeaders(isMultipart: true);
+      debugPrint('createProfile: Using auth headers: $headers');
+      request.headers.addAll(headers);
+      
+      // Add profile data
+      debugPrint('createProfile: Adding profile data');
+      request.fields['name'] = profile.name;
+      request.fields['email'] = profile.email;
+      request.fields['blood_group'] = profile.bloodGroup;
+      request.fields['reg_number'] = profile.regNumber;
+      request.fields['university'] = profile.university;
+      
+      // Check if using ESP32
+      if (_esp32Url != null && _esp32Url!.isNotEmpty) {
+        debugPrint('createProfile: Using ESP32 camera: $_esp32Url');
+        request.fields['use_esp32'] = 'true';
+        request.fields['esp32_url'] = _esp32Url!;
+      } else {
+        // Add image
+        debugPrint('createProfile: Adding image from file: ${imageFile.path}');
+        try {
+          final bytes = await imageFile.readAsBytes();
+          debugPrint('createProfile: Successfully read ${bytes.length} bytes from image file');
+          
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'image',
+              bytes,
+              filename: imageFile.path.split('/').last,
+              contentType: MediaType('image', 'jpeg'),
+            )
+          );
+        } catch (e) {
+          debugPrint('createProfile: Error reading image file: $e');
+          throw Exception('Error reading image file: $e');
+        }
+      }
+      
+      // Send request
+      debugPrint('createProfile: Sending request to ${request.url}');
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      debugPrint('createProfile: Response status: ${response.statusCode}');
+      debugPrint('createProfile: Response body: ${response.body}');
+      
+      if (response.statusCode == 201) {
+        final profileJson = jsonDecode(response.body);
+        debugPrint('createProfile: Profile created successfully');
+        return Profile.fromJson(profileJson);
+      } else {
+        throw Exception('Failed to create profile: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('createProfile error: $e');
+      throw Exception('Error creating profile: $e');
     }
   }
 
@@ -134,7 +183,7 @@ debugPrint('Login response: ${response.body}');
     );
     
     // Add auth headers
-    request.headers.addAll(_getAuthHeaders());
+    request.headers.addAll(_getAuthHeaders(isMultipart: true));
     
     // Add profile data
     request.fields['name'] = profile.name;
@@ -340,13 +389,21 @@ static Future<File> captureImage() async {
   }
 
   // Helpers
-  static Map<String, String> _getAuthHeaders() {
+  static Map<String, String> _getAuthHeaders({bool isMultipart = false}) {
     if (_token == null) {
       throw Exception('Not authenticated');
     }
-    return {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer $_token',
-    };
+    
+    if (isMultipart) {
+      // For multipart requests, we should not set content-type as it will be set automatically
+      return {
+        'Authorization': 'Bearer $_token',
+      };
+    } else {
+      return {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $_token',
+      };
+    }
   }
 }

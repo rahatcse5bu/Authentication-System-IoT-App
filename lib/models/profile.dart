@@ -23,15 +23,15 @@ class Profile {
 
   factory Profile.fromJson(Map<String, dynamic> json) {
     return Profile(
-      id: json['_id'],
+      id: json['id'].toString(),
       name: json['name'],
       email: json['email'],
-      bloodGroup: json['bloodGroup'],
-      regNumber: json['regNumber'],
+      bloodGroup: json['blood_group'],
+      regNumber: json['reg_number'],
       university: json['university'],
-      imageUrl: json['imageUrl'],
-      registrationDate: DateTime.parse(json['registrationDate']),
-      isActive: json['isActive'] ?? true,
+      imageUrl: json['image'] ?? '',
+      registrationDate: DateTime.parse(json['registration_date']),
+      isActive: json['is_active'] ?? true,
     );
   }
 
@@ -39,12 +39,12 @@ class Profile {
     return {
       'name': name,
       'email': email,
-      'bloodGroup': bloodGroup,
-      'regNumber': regNumber,
+      'blood_group': bloodGroup,
+      'reg_number': regNumber,
       'university': university,
-      'imageUrl': imageUrl,
-      'registrationDate': registrationDate.toIso8601String(),
-      'isActive': isActive,
+      'image': imageUrl,
+      'registration_date': registrationDate.toIso8601String(),
+      'is_active': isActive,
     };
   }
 
