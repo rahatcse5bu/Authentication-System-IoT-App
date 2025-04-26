@@ -3,6 +3,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -10,7 +11,7 @@ import '../models/attendance.dart';
 import '../models/profile.dart';
 
 class ApiService {
-  static const String _baseUrl = 'http://your-django-server.com:8000/api';
+  static const String _baseUrl = 'http://127.0.0.1:8000/api';
   static String? _token;
   static String? _esp32Url;
 
@@ -37,7 +38,7 @@ class ApiService {
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'username': username, 'password': password}),
     );
-
+debugPrint('Login response: ${response.body}');
     if (response.statusCode == 200) {
       final data = jsonDecode(response.body);
       _token = data['access'];

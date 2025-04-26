@@ -27,7 +27,7 @@ class _LoginScreenState extends State<LoginScreen> {
     if (!_formKey.currentState!.validate()) {
       return;
     }
-    
+   
     setState(() {
       _isLoading = true;
       _errorMessage = null;
@@ -37,12 +37,12 @@ class _LoginScreenState extends State<LoginScreen> {
       final success = await Provider.of<AuthProvider>(context, listen: false)
           .login(_usernameController.text, _passwordController.text);
       
-      if (!success && mounted) {
+      // if (!success && mounted) {
         setState(() {
           _errorMessage = 'Invalid username or password';
           _isLoading = false;
         });
-      }
+      // }
     } catch (e) {
       if (mounted) {
         setState(() {
