@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:attendance_app/services/api_service.dart';
+import 'package:attendance/services/api_service.dart';
 
 class SettingsProvider with ChangeNotifier {
   bool _isDarkMode = false;

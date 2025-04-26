@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:attendance_app/providers/auth_provider.dart';
-import 'package:attendance_app/providers/profile_provider.dart';
-import 'package:attendance_app/screens/profile_list_screen.dart';
-import 'package:attendance_app/screens/attendance_screen.dart';
-import 'package:attendance_app/screens/scan_screen.dart';
-import 'package:attendance_app/screens/settings_screen.dart';
+import 'package:attendance/providers/auth_provider.dart';
+import 'package:attendance/providers/profile_provider.dart';
+import 'package:attendance/screens/profile_list_screen.dart';
+import 'package:attendance/screens/attendance_screen.dart';
+import 'package:attendance/screens/scan_screen.dart';
+import 'package:attendance/screens/settings_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   @override

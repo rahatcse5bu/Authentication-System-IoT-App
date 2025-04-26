@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
-import 'package:attendance_app/models/attendance.dart';
-import 'package:attendance_app/services/api_service.dart';
+import 'package:attendance/models/attendance.dart';
+import 'package:attendance/services/api_service.dart';
 
 class AttendanceProvider with ChangeNotifier {
   List<Attendance> _attendanceRecords = [];

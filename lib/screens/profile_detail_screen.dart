@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:attendance_app/models/profile.dart';
-import 'package:attendance_app/providers/attendance_provider.dart';
-import 'package:attendance_app/screens/profile_edit_screen.dart';
+import 'package:attendance/models/profile.dart';
+import 'package:attendance/providers/attendance_provider.dart';
+import 'package:attendance/screens/profile_edit_screen.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 

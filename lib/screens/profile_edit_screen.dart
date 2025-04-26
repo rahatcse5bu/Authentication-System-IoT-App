@@ -1,9 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:attendance_app/models/profile.dart';
-import 'package:attendance_app/providers/profile_provider.dart';
-import 'package:attendance_app/services/api_service.dart';
+import 'package:attendance/models/profile.dart';
+import 'package:attendance/providers/profile_provider.dart';
+import 'package:attendance/services/api_service.dart';
 import 'package:image_picker/image_picker.dart';
 
 class ProfileEditScreen extends StatefulWidget {

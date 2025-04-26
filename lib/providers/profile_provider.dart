@@ -1,7 +1,7 @@
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:attendance_app/models/profile.dart';
-import 'package:attendance_app/services/api_service.dart';
+import 'package:attendance/models/profile.dart';
+import 'package:attendance/services/api_service.dart';
 
 class ProfileProvider with ChangeNotifier {
   List<Profile> _profiles = [];

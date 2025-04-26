@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:attendance_app/providers/profile_provider.dart';
-import 'package:attendance_app/screens/profile_detail_screen.dart';
-import 'package:attendance_app/screens/profile_edit_screen.dart';
+import 'package:attendance/providers/profile_provider.dart';
+import 'package:attendance/screens/profile_detail_screen.dart';
+import 'package:attendance/screens/profile_edit_screen.dart';
 
 class ProfileListScreen extends StatelessWidget {
   @override

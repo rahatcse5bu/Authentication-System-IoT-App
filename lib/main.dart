@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:attendance_app/providers/auth_provider.dart';
-import 'package:attendance_app/providers/settings_provider.dart';
-import 'package:attendance_app/providers/profile_provider.dart';
-import 'package:attendance_app/providers/attendance_provider.dart';
-import 'package:attendance_app/screens/login_screen.dart';
-import 'package:attendance_app/screens/dashboard_screen.dart';
-import 'package:attendance_app/utils/app_theme.dart';
+import 'package:attendance/providers/auth_provider.dart';
+import 'package:attendance/providers/settings_provider.dart';
+import 'package:attendance/providers/profile_provider.dart';
+import 'package:attendance/providers/attendance_provider.dart';
+import 'package:attendance/screens/login_screen.dart';
+import 'package:attendance/screens/dashboard_screen.dart';
+import 'package:attendance/utils/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
