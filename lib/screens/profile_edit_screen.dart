@@ -226,10 +226,18 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> {
           university: _universityController.text,
         );
         
+        // Only pass the image file if a new one was selected
+        File? imageToUpload = _imageFile;
+        if (imageToUpload != null) {
+          debugPrint('ProfileEditScreen: New image selected for update: ${imageToUpload.path}');
+        } else {
+          debugPrint('ProfileEditScreen: No new image selected, using existing image');
+        }
+        
         debugPrint('ProfileEditScreen: Calling profileProvider.updateProfile');
         final success = await profileProvider.updateProfile(
           updatedProfile, 
-          imageFile: _imageFile,
+          imageFile: imageToUpload,
         );
         
         if (success) {

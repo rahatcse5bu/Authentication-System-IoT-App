@@ -63,22 +63,31 @@ class ProfileProvider with ChangeNotifier {
   }
   
   Future<bool> updateProfile(Profile profile, {File? imageFile}) async {
+    debugPrint('ProfileProvider.updateProfile: Starting profile update for ID: ${profile.id}');
     _isLoading = true;
     _error = null;
     notifyListeners();
     
     try {
+      debugPrint('ProfileProvider.updateProfile: Calling ApiService.updateProfile');
       final updatedProfile = await ApiService.updateProfile(profile, imageFile: imageFile);
+      
+      debugPrint('ProfileProvider.updateProfile: Profile updated successfully, updating list');
       final index = _profiles.indexWhere((p) => p.id == profile.id);
       if (index != -1) {
         _profiles[index] = updatedProfile;
+      } else {
+        debugPrint('ProfileProvider.updateProfile: Profile not found in local list, adding it');
+        _profiles.add(updatedProfile);
       }
+      
       _isLoading = false;
       notifyListeners();
       return true;
     } catch (e) {
       _isLoading = false;
       _error = e.toString();
+      debugPrint('ProfileProvider.updateProfile error: $_error');
       notifyListeners();
       return false;
     }

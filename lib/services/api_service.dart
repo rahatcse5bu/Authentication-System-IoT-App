@@ -176,42 +176,114 @@ class ApiService {
   }
 
   static Future<Profile> updateProfile(Profile profile, {File? imageFile}) async {
-    // Create multipart request
-    var request = http.MultipartRequest(
-      'PUT', 
-      Uri.parse('$_baseUrl/profiles/${profile.id}/update_face/')
-    );
-    
-    // Add auth headers
-    request.headers.addAll(_getAuthHeaders(isMultipart: true));
-    
-    // Add profile data
-    request.fields['name'] = profile.name;
-    request.fields['email'] = profile.email;
-    request.fields['blood_group'] = profile.bloodGroup;
-    request.fields['reg_number'] = profile.regNumber;
-    request.fields['university'] = profile.university;
-    request.fields['is_active'] = profile.isActive.toString();
-    
-    // Check if using ESP32 or image file
-    if (imageFile != null) {
-      request.files.add(await http.MultipartFile.fromPath(
-        'image', 
-        imageFile.path,
-      ));
-    } else if (_esp32Url != null && _esp32Url!.isNotEmpty) {
-      request.fields['use_esp32'] = 'true';
-      request.fields['esp32_url'] = _esp32Url!;
-    }
-    
-    // Send request
-    final streamedResponse = await request.send();
-    final response = await http.Response.fromStream(streamedResponse);
-    
-    if (response.statusCode == 200) {
-      return Profile.fromJson(jsonDecode(response.body));
-    } else {
-      throw Exception('Failed to update profile: ${response.body}');
+    debugPrint('updateProfile: Starting profile update for ID: ${profile.id}');
+    try {
+      // Decide whether to use PATCH (no image update) or PUT (with image update)
+      final String method = imageFile == null ? 'PATCH' : 'PUT';
+      debugPrint('updateProfile: Using $method method for update');
+      
+      // For PATCH with no image, use regular JSON request
+      if (method == 'PATCH' && imageFile == null) {
+        final Map<String, dynamic> data = {
+          'name': profile.name,
+          'email': profile.email,
+          'blood_group': profile.bloodGroup,
+          'reg_number': profile.regNumber,
+          'university': profile.university,
+          'is_active': profile.isActive,
+        };
+        
+        debugPrint('updateProfile: Sending PATCH request with data: $data');
+        final response = await http.patch(
+          Uri.parse('$_baseUrl/profiles/${profile.id}/'),
+          headers: _getAuthHeaders(),
+          body: jsonEncode(data),
+        );
+        
+        debugPrint('updateProfile: Response status: ${response.statusCode}');
+        debugPrint('updateProfile: Response body: ${response.body}');
+        
+        if (response.statusCode == 200) {
+          final profileJson = jsonDecode(response.body);
+          debugPrint('updateProfile: Profile updated successfully via PATCH');
+          return Profile.fromJson(profileJson);
+        } else {
+          throw Exception('Failed to update profile: ${response.body}');
+        }
+      }
+      
+      // Otherwise proceed with multipart request for image upload
+      var request = http.MultipartRequest(
+        method, 
+        Uri.parse('$_baseUrl/profiles/${profile.id}/')
+      );
+      
+      // Add auth headers
+      final headers = _getAuthHeaders(isMultipart: true);
+      debugPrint('updateProfile: Using auth headers: $headers');
+      request.headers.addAll(headers);
+      
+      // Add profile data
+      debugPrint('updateProfile: Adding profile data');
+      request.fields['name'] = profile.name;
+      request.fields['email'] = profile.email;
+      request.fields['blood_group'] = profile.bloodGroup;
+      request.fields['reg_number'] = profile.regNumber;
+      request.fields['university'] = profile.university;
+      request.fields['is_active'] = profile.isActive.toString();
+      
+      // Check if using ESP32 or image file
+      if (imageFile != null) {
+        // Verify image file exists
+        if (await imageFile.exists()) {
+          debugPrint('updateProfile: Using image file from path: ${imageFile.path}');
+          try {
+            final bytes = await imageFile.readAsBytes();
+            debugPrint('updateProfile: Successfully read ${bytes.length} bytes from image file');
+            
+            request.files.add(
+              http.MultipartFile.fromBytes(
+                'image',
+                bytes,
+                filename: imageFile.path.split('/').last,
+                contentType: MediaType('image', 'jpeg'),
+              )
+            );
+          } catch (e) {
+            debugPrint('updateProfile: Error reading image file: $e');
+            throw Exception('Error reading image file: $e');
+          }
+        } else {
+          debugPrint('updateProfile: Image file does not exist at path: ${imageFile.path}');
+          throw Exception('Image file does not exist at path: ${imageFile.path}');
+        }
+      } else if (_esp32Url != null && _esp32Url!.isNotEmpty) {
+        debugPrint('updateProfile: Using ESP32 camera: $_esp32Url');
+        request.fields['use_esp32'] = 'true';
+        request.fields['esp32_url'] = _esp32Url!;
+      } else {
+        debugPrint('updateProfile: No new image provided, using existing image');
+        // No image field is sent, so the server will keep the existing image
+      }
+      
+      // Send request
+      debugPrint('updateProfile: Sending request to ${request.url}');
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      debugPrint('updateProfile: Response status: ${response.statusCode}');
+      debugPrint('updateProfile: Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        final profileJson = jsonDecode(response.body);
+        debugPrint('updateProfile: Profile updated successfully');
+        return Profile.fromJson(profileJson);
+      } else {
+        throw Exception('Failed to update profile: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('updateProfile error: $e');
+      throw Exception('Error updating profile: $e');
     }
   }
 
