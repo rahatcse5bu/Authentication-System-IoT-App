@@ -7,9 +7,15 @@ import 'package:attendance/providers/attendance_provider.dart';
 import 'package:attendance/screens/login_screen.dart';
 import 'package:attendance/screens/dashboard_screen.dart';
 import 'package:attendance/utils/app_theme.dart';
+import 'package:attendance/services/api_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Initialize API service before running the app
+  await ApiService.initialize();
+  debugPrint('Main: API Service initialized');
+  
   runApp(MyApp());
 }
 

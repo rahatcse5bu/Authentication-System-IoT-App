@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:attendance/providers/settings_provider.dart';
 import 'package:attendance/providers/auth_provider.dart';
+import 'package:attendance/services/api_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   @override
@@ -43,23 +44,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
         throw Exception('Please enter a URL');
       }
       
-      // Test connection by attempting to fetch an image
+      debugPrint('Testing ESP32 connection to URL: $url');
+      
+      // Save the URL temporarily for testing
+      final previousUrl = Provider.of<SettingsProvider>(context, listen: false).esp32Url;
       await Provider.of<SettingsProvider>(context, listen: false).setEsp32Url(url);
       
       try {
-        await Future.delayed(const Duration(seconds: 1)); // Simulate network request
+        // Use the actual API test endpoint
+        final result = await ApiService.testEsp32Connection(url);
+        debugPrint('Test connection result: $result');
         
-        setState(() {
-          _testResult = 'Connection successful!';
-          _isTesting = false;
-        });
+        if (result.containsKey('success') && result['success'] == true) {
+          setState(() {
+            _testResult = 'Connection successful! ${result['message'] ?? ''}';
+            _isTesting = false;
+          });
+        } else {
+          setState(() {
+            _testResult = 'Connection test failed: ${result['message'] ?? 'Unknown error'}';
+            _isTesting = false;
+          });
+          
+          // Restore previous URL if test failed
+          if (previousUrl != null && previousUrl != url) {
+            await Provider.of<SettingsProvider>(context, listen: false).setEsp32Url(previousUrl);
+          }
+        }
       } catch (e) {
+        debugPrint('Test connection error: $e');
         setState(() {
           _testResult = 'Connection failed: ${e.toString()}';
           _isTesting = false;
         });
+        
+        // Restore previous URL if test failed
+        if (previousUrl != null && previousUrl != url) {
+          await Provider.of<SettingsProvider>(context, listen: false).setEsp32Url(previousUrl);
+        }
       }
     } catch (e) {
+      debugPrint('Settings error: $e');
       setState(() {
         _testResult = e.toString();
         _isTesting = false;
@@ -77,12 +102,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
       return;
     }
     
+    setState(() {
+      _isTesting = true;
+    });
+    
     try {
+      debugPrint('Saving ESP32 URL: $url');
+      
+      // First update the URL in the settings provider (local)
       await Provider.of<SettingsProvider>(context, listen: false).setEsp32Url(url);
+      
+      // Then update settings on the server
+      final result = await ApiService.updateSettings(esp32Url: url);
+      debugPrint('Settings update result: $result');
+      
+      setState(() {
+        _isTesting = false;
+      });
+      
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Settings saved successfully')),
       );
     } catch (e) {
+      debugPrint('Error saving settings: $e');
+      setState(() {
+        _isTesting = false;
+      });
+      
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error: ${e.toString()}')),
       );

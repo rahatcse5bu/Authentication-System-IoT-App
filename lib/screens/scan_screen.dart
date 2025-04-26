@@ -3,11 +3,14 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-
+import 'dart:ui';
+import 'package:http/http.dart' as http;
 
 import '../providers/attendance_provider.dart';
+import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
 
@@ -17,18 +20,39 @@ class ScanScreen extends StatefulWidget {
 }
 
 class _ScanScreenState extends State<ScanScreen> {
+  ApiService _apiService = ApiService();
   Timer? _scanTimer;
-  File? _currentImage;
-  String _statusMessage = 'Ready to scan';
   bool _isScanning = false;
-  List<Map<String, dynamic>> _recognizedProfiles = [];
-  DateTime? _lastScanTime;
+  String _statusMessage = 'Ready to scan';
   int _scanCount = 0;
+  DateTime? _lastScanTime;
+  List<String> _recognizedProfiles = [];
+  
+  // Preview image variables
+  Uint8List? _previewImageBytes;
+  bool _isLoadingPreview = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // No need to initialize _apiService again as it's already done in the field declaration
+    
+    // Fetch preview image on load
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _fetchPreview(showLoadingIndicator: true);
+    });
+  }
   
   @override
   void dispose() {
     _stopScanning();
     super.dispose();
+  }
+  
+  void _displayStatusMessage(String message) {
+    setState(() {
+      _statusMessage = message;
+    });
   }
   
   void _startScanning() {
@@ -63,13 +87,16 @@ class _ScanScreenState extends State<ScanScreen> {
   Future<void> _captureScan() async {
     final settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
     
-    if (settingsProvider.esp32Url == null || settingsProvider.esp32Url!.isEmpty) {
+    if (settingsProvider.esp32Url!.isEmpty) {
+      debugPrint('_captureScan: ESP32 URL not configured');
       setState(() {
         _statusMessage = 'ESP32 camera URL not configured';
       });
       _stopScanning();
       return;
     }
+    
+    debugPrint('_captureScan: Starting scan with ESP32 URL: ${settingsProvider.esp32Url}');
     
     try {
       setState(() {
@@ -79,121 +106,220 @@ class _ScanScreenState extends State<ScanScreen> {
       // Update scan stats
       _scanCount++;
       _lastScanTime = DateTime.now();
+      debugPrint('_captureScan: Scan #$_scanCount at ${_lastScanTime.toString()}');
       
       setState(() {
         _statusMessage = 'Processing image...';
       });
       
       // Call the API to mark attendance with face recognition
+      debugPrint('_captureScan: Calling ApiService.markAttendanceWithFaceRecognition');
       final result = await ApiService.markAttendanceWithFaceRecognition();
+      
+      debugPrint('_captureScan: Received result: $result');
       
       if (result.containsKey('results') && result['results'] is List && (result['results'] as List).isNotEmpty) {
         // Add recognized profiles to the list
+        debugPrint('_captureScan: ${result['results'].length} profiles recognized');
         for (var profile in result['results']) {
           // Check if profile is already in the list
           final existingIndex = _recognizedProfiles.indexWhere(
-            (p) => p['profile_id'] == profile['profile_id']
+            (p) => p == profile['name']
           );
           
           if (existingIndex >= 0) {
             // Update existing profile
-            _recognizedProfiles[existingIndex] = profile;
+            debugPrint('_captureScan: Updating existing profile: ${profile['name']}');
+            _recognizedProfiles[existingIndex] = profile['name'];
           } else {
             // Add new profile
-            _recognizedProfiles.add(profile);
+            debugPrint('_captureScan: Adding new profile: ${profile['name']}');
+            _recognizedProfiles.add(profile['name']);
           }
         }
         
         setState(() {
-          _statusMessage = '${result['results'].length} profile(s) recognized';
+          _statusMessage = '${_recognizedProfiles.length} profile(s) recognized';
         });
       } else {
+        debugPrint('_captureScan: No profiles recognized in the result');
         setState(() {
           _statusMessage = 'No profiles recognized';
         });
       }
     } catch (e) {
+      debugPrint('_captureScan error: $e');
+      
+      String errorMsg = 'Error scanning';
+      
+      // Check for specific error messages
+      String errorString = e.toString().toLowerCase();
+      if (errorString.contains('no active profiles found')) {
+        errorMsg = 'No active profiles - create a profile first';
+      } else if (errorString.contains('face')) {
+        errorMsg = 'No face detected in image';
+      } else if (errorString.contains('network') || errorString.contains('connect')) {
+        errorMsg = 'Network error: Check ESP32 connection';
+      }
+      
       setState(() {
-        _statusMessage = 'Error: ${e.toString()}';
+        _statusMessage = errorMsg;
       });
     }
   }
   
   Future<void> _singleCapture() async {
+    setState(() {
+      _statusMessage = 'Processing...';
+    });
+
     try {
+      await _fetchPreview(); // Get preview image first
+      
+      final response = await ApiService.recognizeFace();
+      
       setState(() {
-        _statusMessage = 'Capturing single image...';
+        _scanCount++;
         _lastScanTime = DateTime.now();
       });
-      
-      // Process a single attendance scan
-      final result = await ApiService.markAttendanceWithFaceRecognition();
-      
-      if (result.containsKey('results') && result['results'] is List && (result['results'] as List).isNotEmpty) {
-        // Add recognized profiles to the list
-        for (var profile in result['results']) {
-          // Check if profile is already in the list
-          final existingIndex = _recognizedProfiles.indexWhere(
-            (p) => p['profile_id'] == profile['profile_id']
-          );
-          
-          if (existingIndex >= 0) {
-            // Update existing profile
-            _recognizedProfiles[existingIndex] = profile;
-          } else {
-            // Add new profile
-            _recognizedProfiles.add(profile);
-          }
-        }
+
+      if (response['success']) {
+        final bool recognized = response['recognized'] ?? false;
+        final String name = response['name'] ?? 'Unknown';
         
         setState(() {
-          _statusMessage = '${result['results'].length} profile(s) recognized';
+          if (recognized) {
+            _statusMessage = 'Recognized: $name';
+            if (!_recognizedProfiles.contains(name)) {
+              _recognizedProfiles.add(name);
+            }
+          } else {
+            _statusMessage = 'Not recognized';
+          }
         });
       } else {
         setState(() {
-          _statusMessage = 'No profiles recognized';
+          _statusMessage = 'Error: ${response['message'] ?? 'Unknown error'}';
         });
       }
     } catch (e) {
       setState(() {
-        _statusMessage = 'Error: ${e.toString()}';
+        _statusMessage = 'Error: ${e.toString().split('\n')[0]}';
       });
     }
   }
   
-  void _clearRecognizedProfiles() {
-    setState(() {
-      _recognizedProfiles = [];
-    });
+  Future<void> _fetchPreview({bool showLoadingIndicator = true}) async {
+    final settings = Provider.of<SettingsProvider>(context, listen: false);
+    if (settings.esp32Url!.isEmpty) {
+      setState(() {
+        _statusMessage = 'ESP32 camera URL not configured';
+        _isLoadingPreview = false;
+      });
+      return;
+    }
+
+    if (showLoadingIndicator) {
+      setState(() {
+        _isLoadingPreview = true;
+      });
+    }
+
+    try {
+      final response = await http.get(
+        Uri.parse('${settings.esp32Url}/capture'),
+      ).timeout(const Duration(seconds: 5));
+
+      if (response.statusCode == 200) {
+        setState(() {
+          _previewImageBytes = response.bodyBytes;
+          _isLoadingPreview = false;
+        });
+      } else {
+        setState(() {
+          _previewImageBytes = null;
+          _isLoadingPreview = false;
+          _statusMessage = 'Error fetching preview: HTTP ${response.statusCode}';
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _previewImageBytes = null;
+        _isLoadingPreview = false;
+        _statusMessage = 'Error fetching preview: ${e.toString().split('\n')[0]}';
+      });
+    }
   }
   
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Consumer<SettingsProvider>(
-        builder: (context, settingsProvider, _) {
-          if (settingsProvider.esp32Url == null || settingsProvider.esp32Url!.isEmpty) {
+      appBar: AppBar(
+        title: const Text('Face Scan'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _isScanning ? null : () {
+              setState(() {
+                _statusMessage = 'Ready to scan';
+                _recognizedProfiles = [];
+                _scanCount = 0;
+                _lastScanTime = null;
+                _previewImageBytes = null;
+              });
+              _fetchPreview(showLoadingIndicator: true);
+            },
+            tooltip: 'Reset',
+          ),
+        ],
+      ),
+      body: Consumer2<ProfileProvider, SettingsProvider>(
+        builder: (context, profileProvider, settingsProvider, child) {
+          // Check if ESP32 URL is configured
+          if (settingsProvider.esp32Url!.isEmpty) {
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(
-                    Icons.camera_alt,
-                    size: 64,
-                    color: Colors.grey,
-                  ),
+                  const Icon(Icons.error_outline, size: 48, color: Colors.orange),
                   const SizedBox(height: 16),
                   const Text(
-                    'ESP32 camera URL not configured',
-                    style: TextStyle(fontSize: 18),
+                    'ESP32 Camera not configured',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 8),
                   ElevatedButton(
                     onPressed: () {
-                      // Navigate to settings tab
-                      DefaultTabController.of(context)?.animateTo(3);
+                      Navigator.pushNamed(context, '/settings');
                     },
-                    child: const Text('Configure Settings'),
+                    child: const Text('Go to Settings'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          if (profileProvider.isLoading) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (profileProvider.profiles.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.person_add_disabled, size: 48, color: Colors.grey),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'No profiles found',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.pushNamed(context, '/profiles');
+                    },
+                    child: const Text('Create Profile'),
                   ),
                 ],
               ),
@@ -204,46 +330,91 @@ class _ScanScreenState extends State<ScanScreen> {
             children: [
               // Status bar
               Container(
-                padding: const EdgeInsets.all(16),
-                color: Theme.of(context).primaryColor.withOpacity(0.1),
-                child: Row(
+                padding: const EdgeInsets.all(12),
+                color: Colors.grey[200],
+                child: Column(
                   children: [
-                    Icon(
-                      _isScanning ? Icons.camera : Icons.camera_alt,
-                      color: Theme.of(context).primaryColor,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
+                    Row(
+                      children: [
+                        Icon(
+                          _isScanning ? Icons.sync : Icons.info_outline,
+                          color: _isScanning ? Colors.green : Colors.blue,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
                             _statusMessage,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
+                            style: const TextStyle(fontSize: 16),
                           ),
-                          if (_lastScanTime != null)
-                            Text(
-                              'Last scan: ${_lastScanTime!.hour.toString().padLeft(2, '0')}:${_lastScanTime!.minute.toString().padLeft(2, '0')}:${_lastScanTime!.second.toString().padLeft(2, '0')}',
-                              style: const TextStyle(fontSize: 12),
+                        ),
+                        Text('Scans: $_scanCount'),
+                      ],
+                    ),
+                    if (_recognizedProfiles.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Icon(Icons.people, size: 20, color: Colors.blue),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              'Recognized: ${_recognizedProfiles.join(", ")}',
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
+                          ),
                         ],
                       ),
-                    ),
-                    if (_isScanning)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.green,
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Text(
-                          'Scan #$_scanCount',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                    ],
+                  ],
+                ),
+              ),
+              
+              // Preview container
+              Expanded(
+                child: Stack(
+                  children: [
+                    Container(
+                      width: double.infinity,
+                      margin: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.grey),
+                        borderRadius: BorderRadius.circular(8),
                       ),
+                      child: _isLoadingPreview
+                          ? const Center(child: CircularProgressIndicator())
+                          : _previewImageBytes != null
+                              ? ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.memory(
+                                    _previewImageBytes!,
+                                    fit: BoxFit.contain,
+                                  ),
+                                )
+                              : Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: const [
+                                    Icon(Icons.camera_alt, size: 48, color: Colors.grey),
+                                    SizedBox(height: 16),
+                                    Text(
+                                      'No preview available',
+                                      style: TextStyle(color: Colors.grey),
+                                    ),
+                                  ],
+                                ),
+                    ),
+                    Positioned(
+                      right: 24,
+                      bottom: 24,
+                      child: FloatingActionButton(
+                        mini: true,
+                        onPressed: _isLoadingPreview ? null : () => _fetchPreview(showLoadingIndicator: true),
+                        tooltip: 'Refresh preview',
+                        child: const Icon(Icons.refresh),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -256,9 +427,9 @@ class _ScanScreenState extends State<ScanScreen> {
                   children: [
                     Expanded(
                       child: ElevatedButton.icon(
-                        icon: const Icon(Icons.camera_alt),
-                        label: const Text('Single Capture'),
                         onPressed: _isScanning ? null : _singleCapture,
+                        icon: const Icon(Icons.camera),
+                        label: const Text('Single Capture'),
                         style: ElevatedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
@@ -267,109 +438,14 @@ class _ScanScreenState extends State<ScanScreen> {
                     const SizedBox(width: 16),
                     Expanded(
                       child: ElevatedButton.icon(
+                        onPressed: _isScanning ? _stopScanning : _startScanning,
                         icon: Icon(_isScanning ? Icons.stop : Icons.play_arrow),
                         label: Text(_isScanning ? 'Stop Scanning' : 'Start Scanning'),
-                        onPressed: _isScanning ? _stopScanning : _startScanning,
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: _isScanning ? Colors.red : Theme.of(context).primaryColor,
+                          backgroundColor: _isScanning ? Colors.red : Colors.green,
                           padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              
-              // Recognized profiles
-              Expanded(
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'Recognized Profiles (${_recognizedProfiles.length})',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          TextButton.icon(
-                            icon: const Icon(Icons.clear_all),
-                            label: const Text('Clear'),
-                            onPressed: _recognizedProfiles.isEmpty ? null : _clearRecognizedProfiles,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(),
-                    Expanded(
-                      child: _recognizedProfiles.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    Icons.face,
-                                    size: 64,
-                                    color: Colors.grey[400],
-                                  ),
-                                  const SizedBox(height: 16),
-                                  Text(
-                                    'No profiles recognized yet',
-                                    style: TextStyle(
-                                      color: Colors.grey[600],
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'Start scanning to mark attendance',
-                                    style: TextStyle(
-                                      color: Colors.grey[500],
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : ListView.builder(
-                              itemCount: _recognizedProfiles.length,
-                              itemBuilder: (context, index) {
-                                final profile = _recognizedProfiles[index];
-                                final isTimeOut = profile['action'] == 'time_out';
-                                
-                                return ListTile(
-                                  leading: CircleAvatar(
-                                    backgroundColor: isTimeOut ? Colors.orange : Colors.green,
-                                    child: Icon(
-                                      isTimeOut ? Icons.logout : Icons.login,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  title: Text(profile['name']),
-                                  subtitle: Text(
-                                    '${isTimeOut ? 'Time Out' : 'Time In'}: ${profile['time'].substring(11, 19)}',
-                                  ),
-                                  trailing: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: isTimeOut ? Colors.orange.withOpacity(0.2) : Colors.green.withOpacity(0.2),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(
-                                      isTimeOut ? 'OUT' : 'IN',
-                                      style: TextStyle(
-                                        color: isTimeOut ? Colors.orange : Colors.green,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
                     ),
                   ],
                 ),

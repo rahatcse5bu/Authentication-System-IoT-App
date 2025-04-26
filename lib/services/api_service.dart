@@ -3,6 +3,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
@@ -19,9 +20,23 @@ class ApiService {
 
   // Initialize with saved settings
   static Future<void> initialize() async {
-    final prefs = await SharedPreferences.getInstance();
-    _token = prefs.getString('auth_token');
-    _esp32Url = prefs.getString('esp32_url');
+    debugPrint('ApiService.initialize: Starting initialization');
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _token = prefs.getString('auth_token');
+      _esp32Url = prefs.getString('esp32_url');
+      
+      debugPrint('ApiService.initialize: Loaded token and ESP32 URL from preferences');
+      debugPrint('ApiService.initialize: ESP32 URL set to: $_esp32Url');
+      
+      if (_token != null) {
+        debugPrint('ApiService.initialize: Authorization token loaded');
+      } else {
+        debugPrint('ApiService.initialize: No authorization token found');
+      }
+    } catch (e) {
+      debugPrint('ApiService.initialize error: $e');
+    }
   }
 
   // Configure ESP32 Camera URL
@@ -326,20 +341,79 @@ class ApiService {
     }
   }
 
+  // Face Recognition method to scan and recognize a face
+  static Future<Map<String, dynamic>> recognizeFace() async {
+    debugPrint('recognizeFace: Starting face recognition');
+    
+    if (_esp32Url == null || _esp32Url!.isEmpty) {
+      debugPrint('recognizeFace: ESP32 URL is not configured');
+      throw Exception('ESP32 camera URL not configured');
+    }
+    
+    debugPrint('recognizeFace: Using ESP32 URL: $_esp32Url');
+    
+    try {
+      final requestBody = {'esp32_url': _esp32Url};
+      debugPrint('recognizeFace: Request body: $requestBody');
+      
+      final response = await http.post(
+        Uri.parse('$_baseUrl/recognition/recognize_face/'),
+        headers: _getAuthHeaders(),
+        body: jsonEncode(requestBody),
+      );
+      
+      debugPrint('recognizeFace: Response status: ${response.statusCode}');
+      debugPrint('recognizeFace: Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        debugPrint('recognizeFace: Face recognition completed');
+        return data;
+      } else {
+        debugPrint('recognizeFace: Failed to recognize face: ${response.body}');
+        throw Exception('Failed to recognize face: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('recognizeFace error: $e');
+      throw Exception('Error recognizing face: $e');
+    }
+  }
+
   // This is the fixed method for face recognition attendance
   static Future<Map<String, dynamic>> markAttendanceWithFaceRecognition() async {
-    final response = await http.post(
-      Uri.parse('$_baseUrl/attendance/mark_attendance/'),
-      headers: _getAuthHeaders(),
-      body: jsonEncode({
-        'esp32_url': _esp32Url,
-      }),
-    );
+    debugPrint('markAttendanceWithFaceRecognition: Starting attendance marking with face recognition');
+    
+    if (_esp32Url == null || _esp32Url!.isEmpty) {
+      debugPrint('markAttendanceWithFaceRecognition: ESP32 URL is not configured');
+      throw Exception('ESP32 camera URL not configured');
+    }
+    
+    debugPrint('markAttendanceWithFaceRecognition: Using ESP32 URL: $_esp32Url');
+    
+    try {
+      final requestBody = {'esp32_url': _esp32Url};
+      debugPrint('markAttendanceWithFaceRecognition: Request body: $requestBody');
+      
+      final response = await http.post(
+        Uri.parse('$_baseUrl/attendance/mark_attendance/'),
+        headers: _getAuthHeaders(),
+        body: jsonEncode(requestBody),
+      );
+      
+      debugPrint('markAttendanceWithFaceRecognition: Response status: ${response.statusCode}');
+      debugPrint('markAttendanceWithFaceRecognition: Response body: ${response.body}');
 
-    if (response.statusCode == 200) {
-      return jsonDecode(response.body);
-    } else {
-      throw Exception('Failed to mark attendance: ${response.body}');
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        debugPrint('markAttendanceWithFaceRecognition: Attendance marked successfully');
+        return data;
+      } else {
+        debugPrint('markAttendanceWithFaceRecognition: Failed to mark attendance: ${response.body}');
+        throw Exception('Failed to mark attendance: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('markAttendanceWithFaceRecognition error: $e');
+      throw Exception('Error marking attendance: $e');
     }
   }
 
@@ -476,6 +550,30 @@ static Future<File> captureImage() async {
         'Content-Type': 'application/json',
         'Authorization': 'Bearer $_token',
       };
+    }
+  }
+
+  // Get the latest image from ESP32 camera for preview
+  static Future<Uint8List?> getEsp32CameraPreview() async {
+    if (_esp32Url == null || _esp32Url!.isEmpty) {
+      debugPrint('getEsp32CameraPreview: ESP32 URL not configured');
+      return null;
+    }
+    
+    debugPrint('getEsp32CameraPreview: Fetching image from: $_esp32Url');
+    try {
+      final response = await http.get(Uri.parse(_esp32Url!));
+      
+      if (response.statusCode == 200) {
+        debugPrint('getEsp32CameraPreview: Successfully received image of size: ${response.bodyBytes.length} bytes');
+        return response.bodyBytes;
+      } else {
+        debugPrint('getEsp32CameraPreview: Failed to get image, status code: ${response.statusCode}');
+        return null;
+      }
+    } catch (e) {
+      debugPrint('getEsp32CameraPreview error: $e');
+      return null;
     }
   }
 }
