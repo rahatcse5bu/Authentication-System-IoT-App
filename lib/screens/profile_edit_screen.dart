@@ -742,6 +742,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           university: _universityController.text,
           imageUrl: '', // Will be assigned by backend
           registrationDate: DateTime.now(),
+          isActive: true, // Explicitly set profile to active
         );
         
         debugPrint('ProfileEditScreen: Calling profileProvider.createProfile');

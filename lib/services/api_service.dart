@@ -628,6 +628,85 @@ class ApiService {
     }
   }
 
+  // Method to regenerate face embeddings for a specific profile
+  static Future<Map<String, dynamic>> regenerateFaceEmbedding(String profileId) async {
+    debugPrint('regenerateFaceEmbedding: Starting regeneration for profile $profileId');
+    
+    if (_esp32Url == null || _esp32Url!.isEmpty) {
+      debugPrint('regenerateFaceEmbedding: ESP32 URL is not configured');
+      throw Exception('ESP32 camera URL not configured');
+    }
+    
+    try {
+      final requestBody = {
+        'profile_id': profileId,
+        'esp32_url': _esp32Url
+      };
+      
+      debugPrint('regenerateFaceEmbedding: Request body: $requestBody');
+      
+      final response = await http.post(
+        Uri.parse('$_baseUrl/recognition/regenerate_face_embedding/'),
+        headers: _getAuthHeaders(),
+        body: jsonEncode(requestBody),
+      );
+      
+      debugPrint('regenerateFaceEmbedding: Response status: ${response.statusCode}');
+      debugPrint('regenerateFaceEmbedding: Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        debugPrint('regenerateFaceEmbedding: Face embedding regenerated successfully');
+        return data;
+      } else {
+        debugPrint('regenerateFaceEmbedding: Failed to regenerate face embedding: ${response.body}');
+        throw Exception('Failed to regenerate face embedding: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('regenerateFaceEmbedding error: $e');
+      throw Exception('Error regenerating face embedding: $e');
+    }
+  }
+  
+  // Method to regenerate face embeddings for all profiles
+  static Future<Map<String, dynamic>> regenerateAllFaceEmbeddings() async {
+    debugPrint('regenerateAllFaceEmbeddings: Starting regeneration for all profiles');
+    
+    if (_esp32Url == null || _esp32Url!.isEmpty) {
+      debugPrint('regenerateAllFaceEmbeddings: ESP32 URL is not configured');
+      throw Exception('ESP32 camera URL not configured');
+    }
+    
+    try {
+      final requestBody = {
+        'esp32_url': _esp32Url
+      };
+      
+      debugPrint('regenerateAllFaceEmbeddings: Request body: $requestBody');
+      
+      final response = await http.post(
+        Uri.parse('$_baseUrl/recognition/regenerate_all_face_embeddings/'),
+        headers: _getAuthHeaders(),
+        body: jsonEncode(requestBody),
+      );
+      
+      debugPrint('regenerateAllFaceEmbeddings: Response status: ${response.statusCode}');
+      debugPrint('regenerateAllFaceEmbeddings: Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        debugPrint('regenerateAllFaceEmbeddings: All face embeddings regenerated successfully');
+        return data;
+      } else {
+        debugPrint('regenerateAllFaceEmbeddings: Failed to regenerate all face embeddings: ${response.body}');
+        throw Exception('Failed to regenerate all face embeddings: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('regenerateAllFaceEmbeddings error: $e');
+      throw Exception('Error regenerating all face embeddings: $e');
+    }
+  }
+
   // Helpers
   static Map<String, String> _getAuthHeaders({bool isMultipart = false}) {
     if (_token == null) {

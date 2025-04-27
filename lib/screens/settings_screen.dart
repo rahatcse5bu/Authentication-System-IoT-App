@@ -14,6 +14,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _esp32UrlController = TextEditingController();
   bool _isTesting = false;
   String? _testResult;
+  bool _isRegeneratingEmbeddings = false;
+  String? _regenerationResult;
   
   @override
   void initState() {
@@ -135,6 +137,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
   
+  Future<void> _regenerateAllFaceEmbeddings() async {
+    setState(() {
+      _isRegeneratingEmbeddings = true;
+      _regenerationResult = null;
+    });
+    
+    try {
+      final result = await ApiService.regenerateAllFaceEmbeddings();
+      debugPrint('Regeneration result: $result');
+      
+      setState(() {
+        _regenerationResult = 'Successfully regenerated face embeddings for ${result['count'] ?? 0} profiles.';
+        _isRegeneratingEmbeddings = false;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_regenerationResult!)),
+      );
+    } catch (e) {
+      debugPrint('Regeneration error: $e');
+      setState(() {
+        _regenerationResult = 'Error: ${e.toString()}';
+        _isRegeneratingEmbeddings = false;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to regenerate face embeddings: ${e.toString()}')),
+      );
+    }
+  }
+  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -198,6 +231,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           padding: const EdgeInsets.symmetric(vertical: 16),
                         ),
                       ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Face Recognition Settings',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'If face recognition is not working correctly, you can regenerate the face embeddings for all profiles.',
+                        style: TextStyle(fontSize: 14),
+                      ),
+                      const SizedBox(height: 16),
+                      ElevatedButton(
+                        onPressed: _isRegeneratingEmbeddings ? null : _regenerateAllFaceEmbeddings,
+                        child: _isRegeneratingEmbeddings
+                            ? const SizedBox(
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text('Regenerate All Face Embeddings'),
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                      ),
+                      if (_regenerationResult != null) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          color: _regenerationResult!.contains('Successfully') ? Colors.green.shade100 : Colors.red.shade100,
+                          child: Text(_regenerationResult!),
+                        ),
+                      ],
                     ],
                   ),
                 ),
