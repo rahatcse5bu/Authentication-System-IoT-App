@@ -6,6 +6,9 @@ import 'package:attendance/providers/profile_provider.dart';
 import 'package:attendance/providers/attendance_provider.dart';
 import 'package:attendance/screens/login_screen.dart';
 import 'package:attendance/screens/dashboard_screen.dart';
+import 'package:attendance/screens/settings_screen.dart';
+import 'package:attendance/screens/profile_list_screen.dart';
+import 'package:attendance/screens/scan_screen.dart';
 import 'package:attendance/utils/app_theme.dart';
 import 'package:attendance/services/api_service.dart';
 
@@ -43,6 +46,11 @@ class MyApp extends StatelessWidget {
                     : LoginScreen();
               },
             ),
+            routes: {
+              '/settings': (context) =>  SettingsScreen(),
+              '/profiles': (context) =>  ProfileListScreen(),
+              '/scan': (context) => ScanScreen(),
+            },
           );
         },
       ),

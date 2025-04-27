@@ -3,15 +3,19 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:http_parser/http_parser.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 import '../models/attendance.dart';
 import '../models/profile.dart';
 import '../utils/constants.dart';
+import '../providers/settings_provider.dart';
+import '../providers/profile_provider.dart';
 
 class ApiService {
   static String get _baseUrl => Constants.baseApiUrl;
@@ -431,28 +435,62 @@ class ApiService {
       throw Exception('Failed to mark attendance: ${response.body}');
     }
   }
-// ESP32 Camera Image Capture
-static Future<File> captureImage() async {
-  if (_esp32Url == null || _esp32Url!.isEmpty) {
-    throw Exception('ESP32 camera URL not configured');
+
+  // ESP32 Camera Image Capture
+  static Future<File> captureImage() async {
+    if (_esp32Url == null || _esp32Url!.isEmpty) {
+      throw Exception('ESP32 camera URL not configured');
+    }
+
+    try {
+      debugPrint('captureImage: Attempting to capture from ESP32 camera at: $_esp32Url');
+      
+      // Try /capture endpoint first
+      final String captureUrl = '$_esp32Url/capture';
+      debugPrint('captureImage: Using capture endpoint: $captureUrl');
+      
+      http.Response? response;
+      
+      try {
+        response = await http.get(Uri.parse(captureUrl))
+          .timeout(const Duration(seconds: 8), onTimeout: () {
+            debugPrint('captureImage: Timeout on capture endpoint');
+            throw TimeoutException('Capture timeout');
+          });
+      } catch (e) {
+        debugPrint('captureImage: Error with capture endpoint: $e');
+        // If capture endpoint fails, try root URL
+        debugPrint('captureImage: Trying root URL: $_esp32Url');
+        response = await http.get(Uri.parse(_esp32Url!))
+          .timeout(const Duration(seconds: 8), onTimeout: () {
+            debugPrint('captureImage: Timeout on root URL');
+            throw TimeoutException('Camera timeout');
+          });
+      }
+      
+      if (response.statusCode == 200) {
+        // Verify we have image data
+        if (response.bodyBytes.length < 100) {
+          throw Exception('Invalid image data received (too small)');
+        }
+        
+        // Save the image to temporary file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${tempDir.path}/esp32_captured_$timestamp.jpg');
+        await tempFile.writeAsBytes(response.bodyBytes);
+        
+        debugPrint('captureImage: Image saved to ${tempFile.path}, size: ${response.bodyBytes.length} bytes');
+        return tempFile;
+      } else {
+        throw Exception('Failed to capture image from ESP32 camera: ${response.statusCode}');
+      }
+    } catch (e) {
+      debugPrint('captureImage error: $e');
+      throw Exception('Error connecting to ESP32 camera: $e');
+    }
   }
 
-  try {
-    final response = await http.get(Uri.parse(_esp32Url!));
-    
-    if (response.statusCode == 200) {
-      // Save the image to temporary file
-      final tempDir = Directory.systemTemp;
-      final tempFile = File('${tempDir.path}/captured_image_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await tempFile.writeAsBytes(response.bodyBytes);
-      return tempFile;
-    } else {
-      throw Exception('Failed to capture image from ESP32 camera: ${response.statusCode}');
-    }
-  } catch (e) {
-    throw Exception('Error connecting to ESP32 camera: $e');
-  }
-}
   static Future<List<Map<String, dynamic>>> getAttendanceReport({
     required String reportType,
     required String startDate,
@@ -560,20 +598,60 @@ static Future<File> captureImage() async {
       return null;
     }
     
-    debugPrint('getEsp32CameraPreview: Fetching image from: $_esp32Url');
-    try {
-      final response = await http.get(Uri.parse(_esp32Url!));
-      
-      if (response.statusCode == 200) {
-        debugPrint('getEsp32CameraPreview: Successfully received image of size: ${response.bodyBytes.length} bytes');
-        return response.bodyBytes;
+    // List of endpoints to try in order of preference
+    List<String> endpointsToTry = [];
+    
+    // Try /capture endpoint first
+    if (!_esp32Url!.toLowerCase().contains("capture")) {
+      if (_esp32Url!.endsWith("/")) {
+        endpointsToTry.add('${_esp32Url}capture');
       } else {
-        debugPrint('getEsp32CameraPreview: Failed to get image, status code: ${response.statusCode}');
-        return null;
+        endpointsToTry.add('${_esp32Url}/capture');
       }
-    } catch (e) {
-      debugPrint('getEsp32CameraPreview error: $e');
-      return null;
     }
+    
+    // Then try base URL
+    endpointsToTry.add(_esp32Url!);
+    
+    // Try /jpg endpoint
+    if (!_esp32Url!.toLowerCase().contains("jpg")) {
+      if (_esp32Url!.endsWith("/")) {
+        endpointsToTry.add('${_esp32Url}jpg');
+      } else {
+        endpointsToTry.add('${_esp32Url}/jpg');
+      }
+    }
+    
+    // Also try /camera/snapshot endpoint (used by some ESP32 camera software)
+    if (_esp32Url!.endsWith("/")) {
+      endpointsToTry.add('${_esp32Url}camera/snapshot');
+    } else {
+      endpointsToTry.add('${_esp32Url}/camera/snapshot');
+    }
+    
+    for (final url in endpointsToTry) {
+      try {
+        debugPrint('getEsp32CameraPreview: Fetching image from: $url');
+        
+        final response = await http.get(Uri.parse(url))
+          .timeout(const Duration(seconds: 5), onTimeout: () {
+            debugPrint('getEsp32CameraPreview: Timeout on $url');
+            throw TimeoutException('Preview timeout');
+          });
+        
+        if (response.statusCode == 200 && response.bodyBytes.length > 100) {
+          debugPrint('getEsp32CameraPreview: Successfully received image from $url, size: ${response.bodyBytes.length} bytes');
+          return response.bodyBytes;
+        } else {
+          debugPrint('getEsp32CameraPreview: Invalid response from $url: ${response.statusCode}, body size: ${response.bodyBytes.length}');
+        }
+      } catch (e) {
+        debugPrint('getEsp32CameraPreview: Error fetching from $url: $e');
+        // Continue to next endpoint
+      }
+    }
+    
+    debugPrint('getEsp32CameraPreview: All endpoints failed');
+    return null;
   }
 }
