@@ -1,5 +1,5 @@
 // lib/screens/scan_screen.dart
-// Updated to use the correct API method for face recognition
+// Updated to use the correct ESP32 URL for MJPEG streaming
 
 import 'dart:async';
 import 'dart:io';
@@ -28,30 +28,273 @@ class _ScanScreenState extends State<ScanScreen> {
   DateTime? _lastScanTime;
   List<String> _recognizedProfiles = [];
   
+  // Stream controller for MJPEG streaming
+  StreamController<Uint8List>? _streamController;
+  bool _isStreamActive = false;
+  
   // Preview image variables
   Uint8List? _previewImageBytes;
   bool _isLoadingPreview = false;
+  
+  // For manual refresh of preview
+  Timer? _refreshTimer;
 
   @override
   void initState() {
     super.initState();
-    // No need to initialize _apiService again as it's already done in the field declaration
     
-    // Fetch preview image on load
+    // Start preview when screen loads
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _fetchPreview(showLoadingIndicator: true);
+      _startCameraPreview();
     });
   }
   
   @override
   void dispose() {
     _stopScanning();
+    _stopCameraPreview();
+    _refreshTimer?.cancel();
     super.dispose();
   }
   
   void _displayStatusMessage(String message) {
     setState(() {
       _statusMessage = message;
+    });
+  }
+  
+  Future<void> _startCameraPreview() async {
+    final settings = Provider.of<SettingsProvider>(context, listen: false);
+    if (settings.esp32Url == null || settings.esp32Url!.isEmpty) {
+      _displayStatusMessage('ESP32 camera URL not configured');
+      return;
+    }
+    
+    // Create a new stream controller if needed
+    _streamController?.close();
+    _streamController = StreamController<Uint8List>();
+    
+    setState(() {
+      _isStreamActive = true;
+      _isLoadingPreview = true;
+      _statusMessage = 'Connecting to camera...';
+    });
+    
+    try {
+      // Connect directly to the ESP32 root URL
+      final Uri uri = Uri.parse(settings.esp32Url!);
+      
+      debugPrint('Connecting to camera at: $uri');
+      
+      // Make HTTP request to MJPEG stream
+      final client = http.Client();
+      final request = http.Request('GET', uri);
+      final response = await client.send(request).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode != 200) {
+        throw Exception('Failed to connect to stream: ${response.statusCode}');
+      }
+      
+      // Check content type to confirm it's a stream
+      final contentType = response.headers['content-type'] ?? '';
+      debugPrint('Content type: $contentType');
+      
+      if (!contentType.toLowerCase().contains('multipart/x-mixed-replace')) {
+        // If we don't have the right content type, try fetching individual images instead
+        _displayStatusMessage('Stream not available, using polling');
+        _stopCameraPreview();
+        _startImagePolling();
+        return;
+      }
+
+      _displayStatusMessage('Live preview active');
+      setState(() {
+        _isLoadingPreview = false;
+      });
+      
+      // Process the multipart stream
+      final stream = response.stream;
+      
+      // MJPEG boundary pattern - this can vary between cameras
+      final RegExp boundaryRegExp = RegExp(r'--[a-zA-Z0-9\.]+'); 
+      final RegExp contentLengthRegExp = RegExp(r'Content-Length: (\d+)');
+      
+      List<int> buffer = [];
+      int expectedLength = -1;
+      bool findingHeader = true;
+      
+      // Listen to the stream
+      stream.listen(
+        (List<int> chunk) {
+          buffer.addAll(chunk);
+          
+          while (buffer.isNotEmpty) {
+            if (findingHeader) {
+              // Convert part of buffer to string to find headers
+              final int searchLength = buffer.length > 1024 ? 1024 : buffer.length;
+              final String headerString = String.fromCharCodes(buffer.sublist(0, searchLength));
+              
+              // Find boundary
+              final boundaryMatch = boundaryRegExp.firstMatch(headerString);
+              if (boundaryMatch == null) {
+                if (buffer.length > 4096) {
+                  // If buffer is too large and no boundary found, clear it
+                  buffer = [];
+                }
+                break; // Need more data
+              }
+              
+              // Find content length
+              final contentLengthMatch = contentLengthRegExp.firstMatch(headerString);
+              if (contentLengthMatch != null) {
+                expectedLength = int.tryParse(contentLengthMatch.group(1) ?? '0') ?? 0;
+                debugPrint('Found image with length: $expectedLength');
+              } else {
+                expectedLength = -1;
+              }
+              
+              // Find end of header
+              final int headerEnd = headerString.indexOf('\r\n\r\n');
+              if (headerEnd > 0) {
+                // Remove header from buffer
+                buffer = buffer.sublist(headerEnd + 4);
+                findingHeader = false;
+              } else {
+                break; // Need more data
+              }
+            } else {
+              // We're processing image data
+              if (expectedLength > 0) {
+                // If we know content length
+                if (buffer.length >= expectedLength) {
+                  // We have a complete frame
+                  final imageData = buffer.sublist(0, expectedLength);
+                  
+                  // Add frame to stream
+                  if (!_streamController!.isClosed) {
+                    _streamController!.add(Uint8List.fromList(imageData));
+                  }
+                  
+                  // Remove frame from buffer
+                  buffer = buffer.sublist(expectedLength);
+                  findingHeader = true;
+                } else {
+                  break; // Need more data
+                }
+              } else {
+                // If we don't know content length, look for next boundary
+                final String dataString = String.fromCharCodes(buffer.take(Math.min(buffer.length, 200)).toList());
+                final boundaryMatch = boundaryRegExp.firstMatch(dataString);
+                
+                if (boundaryMatch != null) {
+                  // We found the next boundary, so extract the image data
+                  final imageData = buffer.sublist(0, boundaryMatch.start);
+                  
+                  // Add frame to stream if it's a reasonable size
+                  if (imageData.length > 100 && !_streamController!.isClosed) {
+                    _streamController!.add(Uint8List.fromList(imageData));
+                  }
+                  
+                  // Remove frame and boundary from buffer
+                  buffer = buffer.sublist(boundaryMatch.start);
+                  findingHeader = true;
+                } else if (buffer.length > 1024 * 1024) {
+                  // Buffer too big, something went wrong
+                  buffer = [];
+                  findingHeader = true;
+                } else {
+                  break; // Need more data
+                }
+              }
+            }
+          }
+        },
+        onError: (error) {
+          debugPrint('Stream error: $error');
+          _displayStatusMessage('Stream error: ${error.toString().split('\n')[0]}');
+          _restartCameraPreview();
+        },
+        onDone: () {
+          debugPrint('Stream ended');
+          _displayStatusMessage('Stream ended');
+          _restartCameraPreview();
+        },
+        cancelOnError: false,
+      );
+    } catch (e) {
+      debugPrint('Error connecting to stream: $e');
+      _displayStatusMessage('Error connecting to stream: ${e.toString().split('\n')[0]}');
+      setState(() {
+        _isStreamActive = false;
+        _isLoadingPreview = false;
+      });
+      
+      // Try image polling as fallback
+      _startImagePolling();
+    }
+  }
+  
+  void _startImagePolling() {
+    debugPrint('Starting image polling');
+    // Clear any existing timer
+    _refreshTimer?.cancel();
+    
+    // Create a new timer to periodically fetch images
+    _refreshTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      _fetchSingleImage();
+    });
+  }
+  
+  Future<void> _fetchSingleImage() async {
+    if (!mounted) return;
+    
+    final settings = Provider.of<SettingsProvider>(context, listen: false);
+    if (settings.esp32Url == null || settings.esp32Url!.isEmpty) return;
+    
+    try {
+      // Request a single image from the camera
+      final response = await http.get(
+        Uri.parse('${settings.esp32Url}/capture'), 
+      ).timeout(const Duration(seconds: 3));
+      
+      if (response.statusCode == 200) {
+        if (!mounted) return;
+        
+        setState(() {
+          _previewImageBytes = response.bodyBytes;
+          _isLoadingPreview = false;
+        });
+        
+        // Don't update the message if scanning is active
+        if (!_isScanning) {
+          _displayStatusMessage('Preview refreshed');
+        }
+      }
+    } catch (e) {
+      // Silently fail during polling
+      debugPrint('Image polling error: $e');
+    }
+  }
+  
+  void _stopCameraPreview() {
+    _streamController?.close();
+    _streamController = null;
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    
+    setState(() {
+      _isStreamActive = false;
+    });
+  }
+  
+  void _restartCameraPreview() {
+    if (!mounted) return;
+    
+    _stopCameraPreview();
+    
+    // Restart after a short delay
+    Future.delayed(Duration(seconds: 2), () {
+      if (mounted) _startCameraPreview();
     });
   }
   
@@ -87,7 +330,7 @@ class _ScanScreenState extends State<ScanScreen> {
   Future<void> _captureScan() async {
     final settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
     
-    if (settingsProvider.esp32Url!.isEmpty) {
+    if (settingsProvider.esp32Url == null || settingsProvider.esp32Url!.isEmpty) {
       debugPrint('_captureScan: ESP32 URL not configured');
       setState(() {
         _statusMessage = 'ESP32 camera URL not configured';
@@ -100,7 +343,7 @@ class _ScanScreenState extends State<ScanScreen> {
     
     try {
       setState(() {
-        _statusMessage = 'Capturing image...';
+        _statusMessage = 'Scanning...';
       });
       
       // Update scan stats
@@ -108,11 +351,8 @@ class _ScanScreenState extends State<ScanScreen> {
       _lastScanTime = DateTime.now();
       debugPrint('_captureScan: Scan #$_scanCount at ${_lastScanTime.toString()}');
       
-      setState(() {
-        _statusMessage = 'Processing image...';
-      });
-      
       // Call the API to mark attendance with face recognition
+      // The live preview is already running so we don't need to capture a new image
       debugPrint('_captureScan: Calling ApiService.markAttendanceWithFaceRecognition');
       final result = await ApiService.markAttendanceWithFaceRecognition();
       
@@ -174,7 +414,7 @@ class _ScanScreenState extends State<ScanScreen> {
     });
 
     try {
-      await _fetchPreview(); // Get preview image first
+      // No need to fetch a preview - we already have the live stream
       
       final response = await ApiService.recognizeFace();
       
@@ -209,48 +449,6 @@ class _ScanScreenState extends State<ScanScreen> {
     }
   }
   
-  Future<void> _fetchPreview({bool showLoadingIndicator = true}) async {
-    final settings = Provider.of<SettingsProvider>(context, listen: false);
-    if (settings.esp32Url!.isEmpty) {
-      setState(() {
-        _statusMessage = 'ESP32 camera URL not configured';
-        _isLoadingPreview = false;
-      });
-      return;
-    }
-
-    if (showLoadingIndicator) {
-      setState(() {
-        _isLoadingPreview = true;
-      });
-    }
-
-    try {
-      final response = await http.get(
-        Uri.parse('${settings.esp32Url}/capture'),
-      ).timeout(const Duration(seconds: 5));
-
-      if (response.statusCode == 200) {
-        setState(() {
-          _previewImageBytes = response.bodyBytes;
-          _isLoadingPreview = false;
-        });
-      } else {
-        setState(() {
-          _previewImageBytes = null;
-          _isLoadingPreview = false;
-          _statusMessage = 'Error fetching preview: HTTP ${response.statusCode}';
-        });
-      }
-    } catch (e) {
-      setState(() {
-        _previewImageBytes = null;
-        _isLoadingPreview = false;
-        _statusMessage = 'Error fetching preview: ${e.toString().split('\n')[0]}';
-      });
-    }
-  }
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -265,9 +463,9 @@ class _ScanScreenState extends State<ScanScreen> {
                 _recognizedProfiles = [];
                 _scanCount = 0;
                 _lastScanTime = null;
-                _previewImageBytes = null;
               });
-              _fetchPreview(showLoadingIndicator: true);
+              // Restart camera preview
+              _restartCameraPreview();
             },
             tooltip: 'Reset',
           ),
@@ -276,7 +474,7 @@ class _ScanScreenState extends State<ScanScreen> {
       body: Consumer2<ProfileProvider, SettingsProvider>(
         builder: (context, profileProvider, settingsProvider, child) {
           // Check if ESP32 URL is configured
-          if (settingsProvider.esp32Url!.isEmpty) {
+          if (settingsProvider.esp32Url == null || settingsProvider.esp32Url!.isEmpty) {
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -337,8 +535,8 @@ class _ScanScreenState extends State<ScanScreen> {
                     Row(
                       children: [
                         Icon(
-                          _isScanning ? Icons.sync : Icons.info_outline,
-                          color: _isScanning ? Colors.green : Colors.blue,
+                          _isScanning ? Icons.sync : (_isStreamActive ? Icons.videocam : Icons.info_outline),
+                          color: _isScanning ? Colors.green : (_isStreamActive ? Colors.blue : Colors.orange),
                         ),
                         const SizedBox(width: 8),
                         Expanded(
@@ -385,33 +583,67 @@ class _ScanScreenState extends State<ScanScreen> {
                       ),
                       child: _isLoadingPreview
                           ? const Center(child: CircularProgressIndicator())
-                          : _previewImageBytes != null
+                          : _isStreamActive
                               ? ClipRRect(
                                   borderRadius: BorderRadius.circular(8),
-                                  child: Image.memory(
-                                    _previewImageBytes!,
-                                    fit: BoxFit.contain,
+                                  child: StreamBuilder<Uint8List>(
+                                    stream: _streamController?.stream,
+                                    builder: (context, snapshot) {
+                                      if (snapshot.hasError) {
+                                        return Center(
+                                          child: Text('Stream error: ${snapshot.error}'),
+                                        );
+                                      }
+                                      
+                                      if (snapshot.connectionState == ConnectionState.waiting || !snapshot.hasData) {
+                                        if (_previewImageBytes != null) {
+                                          // Show the polled image while waiting for stream
+                                          return Image.memory(
+                                            _previewImageBytes!,
+                                            fit: BoxFit.contain,
+                                          );
+                                        }
+                                        
+                                        return const Center(
+                                          child: CircularProgressIndicator(),
+                                        );
+                                      }
+                                      
+                                      return Image.memory(
+                                        snapshot.data!,
+                                        gaplessPlayback: true,
+                                        fit: BoxFit.contain,
+                                      );
+                                    },
                                   ),
                                 )
-                              : Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: const [
-                                    Icon(Icons.camera_alt, size: 48, color: Colors.grey),
-                                    SizedBox(height: 16),
-                                    Text(
-                                      'No preview available',
-                                      style: TextStyle(color: Colors.grey),
+                              : _previewImageBytes != null
+                                  ? ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Image.memory(
+                                        _previewImageBytes!,
+                                        fit: BoxFit.contain,
+                                      ),
+                                    )
+                                  : Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: const [
+                                        Icon(Icons.camera_alt, size: 48, color: Colors.grey),
+                                        SizedBox(height: 16),
+                                        Text(
+                                          'No preview available',
+                                          style: TextStyle(color: Colors.grey),
+                                        ),
+                                      ],
                                     ),
-                                  ],
-                                ),
                     ),
                     Positioned(
                       right: 24,
                       bottom: 24,
                       child: FloatingActionButton(
                         mini: true,
-                        onPressed: _isLoadingPreview ? null : () => _fetchPreview(showLoadingIndicator: true),
-                        tooltip: 'Refresh preview',
+                        onPressed: _isLoadingPreview ? null : _restartCameraPreview,
+                        tooltip: 'Restart preview',
                         child: const Icon(Icons.refresh),
                       ),
                     ),
@@ -456,4 +688,9 @@ class _ScanScreenState extends State<ScanScreen> {
       ),
     );
   }
+}
+
+// Add this extension to support Math.min function
+extension Math on num {
+  static int min(int a, int b) => a < b ? a : b;
 }
