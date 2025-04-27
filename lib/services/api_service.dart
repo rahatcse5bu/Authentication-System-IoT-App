@@ -1,9 +1,9 @@
 // lib/services/api_service.dart
 // Updated to correctly handle face recognition attendance marking
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -147,30 +147,30 @@ class ApiService {
       request.fields['reg_number'] = profile.regNumber;
       request.fields['university'] = profile.university;
       
-      // Check if using ESP32
+      // Add ESP32 info if available
       if (_esp32Url != null && _esp32Url!.isNotEmpty) {
         debugPrint('createProfile: Using ESP32 camera: $_esp32Url');
         request.fields['use_esp32'] = 'true';
         request.fields['esp32_url'] = _esp32Url!;
-      } else {
-        // Add image
-        debugPrint('createProfile: Adding image from file: ${imageFile.path}');
-        try {
-          final bytes = await imageFile.readAsBytes();
-          debugPrint('createProfile: Successfully read ${bytes.length} bytes from image file');
-          
-          request.files.add(
-            http.MultipartFile.fromBytes(
-              'image',
-              bytes,
-              filename: imageFile.path.split('/').last,
-              contentType: MediaType('image', 'jpeg'),
-            )
-          );
-        } catch (e) {
-          debugPrint('createProfile: Error reading image file: $e');
-          throw Exception('Error reading image file: $e');
-        }
+      }
+      
+      // Always add the image file
+      debugPrint('createProfile: Adding image from file: ${imageFile.path}');
+      try {
+        final bytes = await imageFile.readAsBytes();
+        debugPrint('createProfile: Successfully read ${bytes.length} bytes from image file');
+        
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            'image',
+            bytes,
+            filename: imageFile.path.split('/').last,
+            contentType: MediaType('image', 'jpeg'),
+          )
+        );
+      } catch (e) {
+        debugPrint('createProfile: Error reading image file: $e');
+        throw Exception('Error reading image file: $e');
       }
       
       // Send request
@@ -251,7 +251,14 @@ class ApiService {
       request.fields['university'] = profile.university;
       request.fields['is_active'] = profile.isActive.toString();
       
-      // Check if using ESP32 or image file
+      // Add ESP32 info if available
+      if (_esp32Url != null && _esp32Url!.isNotEmpty) {
+        debugPrint('updateProfile: Using ESP32 camera: $_esp32Url');
+        request.fields['use_esp32'] = 'true';
+        request.fields['esp32_url'] = _esp32Url!;
+      }
+      
+      // Add image file if provided
       if (imageFile != null) {
         // Verify image file exists
         if (await imageFile.exists()) {
@@ -276,10 +283,6 @@ class ApiService {
           debugPrint('updateProfile: Image file does not exist at path: ${imageFile.path}');
           throw Exception('Image file does not exist at path: ${imageFile.path}');
         }
-      } else if (_esp32Url != null && _esp32Url!.isNotEmpty) {
-        debugPrint('updateProfile: Using ESP32 camera: $_esp32Url');
-        request.fields['use_esp32'] = 'true';
-        request.fields['esp32_url'] = _esp32Url!;
       } else {
         debugPrint('updateProfile: No new image provided, using existing image');
         // No image field is sent, so the server will keep the existing image
@@ -445,50 +448,103 @@ class ApiService {
     try {
       debugPrint('captureImage: Attempting to capture from ESP32 camera at: $_esp32Url');
       
+      // Try different endpoints in order of reliability
+      List<String> endpointsToTry = [];
+      
       // Try /capture endpoint first
-      final String captureUrl = '$_esp32Url/capture';
-      debugPrint('captureImage: Using capture endpoint: $captureUrl');
-      
-      http.Response? response;
-      
-      try {
-        response = await http.get(Uri.parse(captureUrl))
-          .timeout(const Duration(seconds: 8), onTimeout: () {
-            debugPrint('captureImage: Timeout on capture endpoint');
-            throw TimeoutException('Capture timeout');
-          });
-      } catch (e) {
-        debugPrint('captureImage: Error with capture endpoint: $e');
-        // If capture endpoint fails, try root URL
-        debugPrint('captureImage: Trying root URL: $_esp32Url');
-        response = await http.get(Uri.parse(_esp32Url!))
-          .timeout(const Duration(seconds: 8), onTimeout: () {
-            debugPrint('captureImage: Timeout on root URL');
-            throw TimeoutException('Camera timeout');
-          });
-      }
-      
-      if (response.statusCode == 200) {
-        // Verify we have image data
-        if (response.bodyBytes.length < 100) {
-          throw Exception('Invalid image data received (too small)');
+      if (!_esp32Url!.toLowerCase().contains("capture")) {
+        if (_esp32Url!.endsWith("/")) {
+          endpointsToTry.add('${_esp32Url}capture');
+        } else {
+          endpointsToTry.add('${_esp32Url}/capture');
         }
-        
-        // Save the image to temporary file
-        final tempDir = await getTemporaryDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final tempFile = File('${tempDir.path}/esp32_captured_$timestamp.jpg');
-        await tempFile.writeAsBytes(response.bodyBytes);
-        
-        debugPrint('captureImage: Image saved to ${tempFile.path}, size: ${response.bodyBytes.length} bytes');
-        return tempFile;
-      } else {
-        throw Exception('Failed to capture image from ESP32 camera: ${response.statusCode}');
       }
+      
+      // Then try base URL
+      endpointsToTry.add(_esp32Url!);
+      
+      // Then try /jpg endpoint 
+      if (!_esp32Url!.toLowerCase().contains("jpg")) {
+        if (_esp32Url!.endsWith("/")) {
+          endpointsToTry.add('${_esp32Url}jpg');
+        } else {
+          endpointsToTry.add('${_esp32Url}/jpg');
+        }
+      }
+      
+      // Also try /camera/snapshot endpoint (some ESP32 cams use this)
+      if (_esp32Url!.endsWith("/")) {
+        endpointsToTry.add('${_esp32Url}camera/snapshot');
+      } else {
+        endpointsToTry.add('${_esp32Url}/camera/snapshot');
+      }
+      
+      Exception? lastException;
+      
+      for (final url in endpointsToTry) {
+        try {
+          debugPrint('captureImage: Trying endpoint: $url');
+          
+          final response = await http.get(Uri.parse(url))
+            .timeout(const Duration(seconds: 5), onTimeout: () {
+              debugPrint('captureImage: Timeout on endpoint $url');
+              throw TimeoutException('Camera timeout');
+            });
+          
+          if (response.statusCode == 200 && response.bodyBytes.length > 100) {
+            // Check if data looks like an image
+            if (_isValidImage(response.bodyBytes)) {
+              // Save the image to application documents directory for better persistence
+              final appDir = await getApplicationDocumentsDirectory();
+              final timestamp = DateTime.now().millisecondsSinceEpoch;
+              final imageFile = File('${appDir.path}/esp32_captured_$timestamp.jpg');
+              await imageFile.writeAsBytes(response.bodyBytes);
+              
+              debugPrint('captureImage: Image saved to ${imageFile.path}, size: ${response.bodyBytes.length} bytes');
+              return imageFile;
+            } else {
+              debugPrint('captureImage: Invalid image data from $url');
+              continue; // Try next endpoint
+            }
+          } else {
+            debugPrint('captureImage: Invalid response from $url: ${response.statusCode}, size: ${response.bodyBytes.length}');
+          }
+        } catch (e) {
+          debugPrint('captureImage: Error with endpoint $url: $e');
+          lastException = e as Exception;
+          // Try next endpoint
+          continue;
+        }
+      }
+      
+      // If we get here, all endpoints failed
+      throw lastException ?? Exception('Failed to capture image from any endpoint');
     } catch (e) {
       debugPrint('captureImage error: $e');
       throw Exception('Error connecting to ESP32 camera: $e');
     }
+  }
+  
+  // Helper method to check if data is a valid image
+  static bool _isValidImage(Uint8List bytes) {
+    // Check for JPEG signature at start of file
+    if (bytes.length > 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+      return true;
+    }
+    
+    // Check for common HTML patterns that indicate we got a webpage instead of an image
+    if (bytes.length > 15) {
+      String start = String.fromCharCodes(bytes.sublist(0, 15).where((c) => c >= 32 && c < 127));
+      if (start.toLowerCase().contains('<!doctype') || 
+          start.toLowerCase().contains('<html') ||
+          start.toLowerCase().contains('<?xml')) {
+        debugPrint('API Service: Detected HTML content instead of image');
+        return false;
+      }
+    }
+    
+    // If we can't definitively say it's bad, let's try it as an image
+    return bytes.length > 1000; // At least some reasonable size for an image
   }
 
   static Future<List<Map<String, dynamic>>> getAttendanceReport({

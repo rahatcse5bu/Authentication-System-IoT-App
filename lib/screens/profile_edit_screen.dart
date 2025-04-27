@@ -573,10 +573,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           _isProcessing = true;
         });
         
-        // Save preview image to file
-        final tempDir = await getTemporaryDirectory();
+        // Use application documents directory instead of temporary directory
+        final appDir = await getApplicationDocumentsDirectory();
         final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final imagePath = '${tempDir.path}/esp32_profile_$timestamp.jpg';
+        final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
         
         final imageFile = File(imagePath);
         await imageFile.writeAsBytes(_previewImageBytes!);
@@ -628,17 +628,30 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           _isProcessing = true;
         });
         
-        final File imageFile = await ApiService.captureImage();
-        debugPrint('ESP32 image captured to: ${imageFile.path}');
+        // Get the captured image from API
+        final tempFile = await ApiService.captureImage();
+        debugPrint('ESP32 image captured to temp location: ${tempFile.path}');
         
         // Verify file exists and has content
-        if (await imageFile.exists()) {
-          final size = await imageFile.length();
+        if (await tempFile.exists()) {
+          final size = await tempFile.length();
           debugPrint('ESP32 image size: $size bytes');
           
           if (size > 0) {
+            // Copy to a more permanent location
+            final appDir = await getApplicationDocumentsDirectory();
+            final timestamp = DateTime.now().millisecondsSinceEpoch;
+            final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
+            
+            // Copy file to permanent location
+            final bytes = await tempFile.readAsBytes();
+            final permanentFile = File(imagePath);
+            await permanentFile.writeAsBytes(bytes);
+            
+            debugPrint('Image copied to permanent location: ${permanentFile.path}');
+            
             setState(() {
-              _imageFile = imageFile;
+              _imageFile = permanentFile;
               _isProcessing = false;
             });
           } else {
