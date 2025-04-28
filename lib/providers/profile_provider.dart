@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:attendance/models/profile.dart';
 import 'package:attendance/services/api_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ProfileProvider with ChangeNotifier {
   List<Profile> _profiles = [];
@@ -12,18 +13,50 @@ class ProfileProvider with ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
   
+  ProfileProvider() {
+    debugPrint('ProfileProvider: Initializing provider');
+    // Check if we have an auth token before loading profiles
+    _checkAuthAndLoadProfiles();
+  }
+  
+  Future<void> _checkAuthAndLoadProfiles() async {
+    debugPrint('ProfileProvider._checkAuthAndLoadProfiles: Checking authentication state');
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final token = prefs.getString('auth_token');
+      
+      if (token == null) {
+        debugPrint('ProfileProvider._checkAuthAndLoadProfiles: No auth token found');
+        _error = 'Not authenticated';
+        notifyListeners();
+        return;
+      }
+      
+      debugPrint('ProfileProvider._checkAuthAndLoadProfiles: Auth token found, loading profiles');
+      await fetchProfiles();
+    } catch (e) {
+      debugPrint('ProfileProvider._checkAuthAndLoadProfiles error: $e');
+      _error = e.toString();
+      notifyListeners();
+    }
+  }
+  
   Future<void> fetchProfiles() async {
+    debugPrint('ProfileProvider.fetchProfiles: Starting to fetch profiles');
     _isLoading = true;
     _error = null;
     notifyListeners();
     
     try {
+      debugPrint('ProfileProvider.fetchProfiles: Calling ApiService.getProfiles');
       _profiles = await ApiService.getProfiles();
+      debugPrint('ProfileProvider.fetchProfiles: Successfully fetched ${_profiles.length} profiles');
       _isLoading = false;
       notifyListeners();
     } catch (e) {
       _isLoading = false;
       _error = e.toString();
+      debugPrint('ProfileProvider.fetchProfiles error: $_error');
       notifyListeners();
     }
   }
@@ -38,7 +71,7 @@ class ProfileProvider with ChangeNotifier {
     }
   }
   
-  Future<bool> createProfile(Profile profile, File imageFile) async {
+  Future<bool> createProfile(Profile profile, List<File> imageFiles) async {
     debugPrint('ProfileProvider.createProfile: Starting profile creation');
     _isLoading = true;
     _error = null;
@@ -46,7 +79,7 @@ class ProfileProvider with ChangeNotifier {
     
     try {
       debugPrint('ProfileProvider.createProfile: Calling ApiService.createProfile');
-      final newProfile = await ApiService.createProfile(profile, imageFile);
+      final newProfile = await ApiService.createProfile(profile, imageFiles);
       
       debugPrint('ProfileProvider.createProfile: Profile created successfully, adding to list');
       _profiles.add(newProfile);
@@ -62,7 +95,7 @@ class ProfileProvider with ChangeNotifier {
     }
   }
   
-  Future<bool> updateProfile(Profile profile, {File? imageFile}) async {
+  Future<bool> updateProfile(Profile profile, {List<File>? imageFiles}) async {
     debugPrint('ProfileProvider.updateProfile: Starting profile update for ID: ${profile.id}');
     _isLoading = true;
     _error = null;
@@ -70,7 +103,13 @@ class ProfileProvider with ChangeNotifier {
     
     try {
       debugPrint('ProfileProvider.updateProfile: Calling ApiService.updateProfile');
-      final updatedProfile = await ApiService.updateProfile(profile, imageFile: imageFile);
+      final updatedProfile = await ApiService.updateProfile(profile);
+      
+      // If new face images are provided, add them
+      if (imageFiles != null && imageFiles.isNotEmpty) {
+        debugPrint('ProfileProvider.updateProfile: Adding new face images');
+        await ApiService.addFaceImages(profile.id, imageFiles);
+      }
       
       debugPrint('ProfileProvider.updateProfile: Profile updated successfully, updating list');
       final index = _profiles.indexWhere((p) => p.id == profile.id);
@@ -109,6 +148,38 @@ class ProfileProvider with ChangeNotifier {
     } catch (e) {
       _isLoading = false;
       _error = e.toString();
+      notifyListeners();
+      return false;
+    }
+  }
+  
+  Future<bool> addEsp32CameraImages(Profile profile) async {
+    debugPrint('ProfileProvider.addEsp32CameraImages: Starting to capture ESP32 images');
+    _isLoading = true;
+    _error = null;
+    notifyListeners();
+    
+    try {
+      // Capture image from ESP32 camera
+      final imageFile = await ApiService.captureImage();
+      debugPrint('ProfileProvider.addEsp32CameraImages: Image captured successfully');
+      
+      // Add the captured image to the profile
+      final updatedProfile = await ApiService.addFaceImages(profile.id, [imageFile]);
+      
+      // Update the profile in the local list
+      final index = _profiles.indexWhere((p) => p.id == profile.id);
+      if (index != -1) {
+        _profiles[index] = updatedProfile;
+      }
+      
+      _isLoading = false;
+      notifyListeners();
+      return true;
+    } catch (e) {
+      _isLoading = false;
+      _error = e.toString();
+      debugPrint('ProfileProvider.addEsp32CameraImages error: $_error');
       notifyListeners();
       return false;
     }

@@ -25,6 +25,7 @@ class ApiService {
   // Initialize with saved settings
   static Future<void> initialize() async {
     debugPrint('ApiService.initialize: Starting initialization');
+    debugPrint('ApiService.initialize: Base URL: $_baseUrl');
     try {
       final prefs = await SharedPreferences.getInstance();
       _token = prefs.getString('auth_token');
@@ -38,8 +39,24 @@ class ApiService {
       } else {
         debugPrint('ApiService.initialize: No authorization token found');
       }
+
+      // Test connection to the server
+      try {
+        final response = await http.get(Uri.parse('$_baseUrl/')).timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {
+            throw TimeoutException('Server connection test timed out');
+          },
+        );
+        debugPrint('ApiService.initialize: Server connection test successful');
+        debugPrint('ApiService.initialize: Server response: ${response.statusCode}');
+      } catch (e) {
+        debugPrint('ApiService.initialize: Server connection test failed: $e');
+        throw Exception('Could not connect to server at $_baseUrl. Please check if the server is running.');
+      }
     } catch (e) {
       debugPrint('ApiService.initialize error: $e');
+      rethrow;
     }
   }
 
@@ -95,24 +112,67 @@ class ApiService {
 
   // Profile Management
   static Future<List<Profile>> getProfiles() async {
-    final response = await http.get(
-      Uri.parse('$_baseUrl/profiles/'),
-      headers: _getAuthHeaders(),
-    );
+    debugPrint('getProfiles: Fetching all profiles');
+    debugPrint('getProfiles: Using base URL: $_baseUrl');
+    debugPrint('getProfiles: Auth token: ${_token != null ? "Present" : "Missing"}');
+    
+    try {
+      final uri = Uri.parse('$_baseUrl/profiles/');
+      debugPrint('getProfiles: Full URL: $uri');
+      
+      final headers = _getAuthHeaders();
+      debugPrint('getProfiles: Request headers: $headers');
+      
+      final response = await http.get(uri, headers: headers)
+          .timeout(const Duration(seconds: 10), onTimeout: () {
+            debugPrint('getProfiles: Request timed out after 10 seconds');
+            throw TimeoutException('Request timed out');
+          });
 
-    if (response.statusCode == 200) {
-      final List<dynamic> data = jsonDecode(response.body);
-      return data.map((json) => Profile.fromJson(json)).toList();
-    } else {
-      throw Exception('Failed to load profiles: ${response.body}');
+      debugPrint('getProfiles: Response status: ${response.statusCode}');
+      debugPrint('getProfiles: Response headers: ${response.headers}');
+      debugPrint('getProfiles: Response body: ${response.body}');
+
+      if (response.statusCode == 200) {
+        try {
+          final List<dynamic> data = jsonDecode(response.body);
+          debugPrint('getProfiles: Successfully parsed ${data.length} profiles');
+          return data.map((json) => Profile.fromJson(json)).toList();
+        } catch (e) {
+          debugPrint('getProfiles: Error parsing response: $e');
+          throw Exception('Error parsing profiles data: $e');
+        }
+      } else if (response.statusCode == 401) {
+        debugPrint('getProfiles: Unauthorized - Token might be invalid or expired');
+        throw Exception('Unauthorized - Please login again');
+      } else if (response.statusCode == 404) {
+        debugPrint('getProfiles: Endpoint not found - Check API URL');
+        throw Exception('API endpoint not found - Check server configuration');
+      } else {
+        debugPrint('getProfiles: Unexpected status code: ${response.statusCode}');
+        throw Exception('Failed to load profiles: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('getProfiles: Network error: $e');
+      if (e is SocketException) {
+        throw Exception('Network error: Could not connect to server. Check if the server is running and accessible.');
+      } else if (e is TimeoutException) {
+        throw Exception('Network error: Request timed out. Check your internet connection and server status.');
+      } else {
+        throw Exception('Error loading profiles: $e');
+      }
     }
   }
 
   static Future<Profile> getProfileById(String id) async {
+    debugPrint('getProfileById: Fetching profile with ID: $id');
     final response = await http.get(
       Uri.parse('$_baseUrl/profiles/$id/'),
       headers: _getAuthHeaders(),
     );
+
+    debugPrint('getProfileById: Response status: ${response.statusCode}');
+    debugPrint('getProfileById: Response body: ${response.body}');
 
     if (response.statusCode == 200) {
       return Profile.fromJson(jsonDecode(response.body));
@@ -121,17 +181,25 @@ class ApiService {
     }
   }
 
-  static Future<Profile> createProfile(Profile profile, File imageFile) async {
+  static Future<Profile> createProfile(Profile profile, List<File> imageFiles) async {
     debugPrint('createProfile: Starting profile creation');
     try {
-      // Check if the file exists before attempting to upload
-      if (!await imageFile.exists()) {
-        throw Exception('Image file does not exist at path: ${imageFile.path}');
+      // Validate image files
+      if (imageFiles.isEmpty) {
+        throw Exception('At least one face image is required');
       }
       
-      debugPrint('createProfile: Image file exists at ${imageFile.path}, size: ${await imageFile.length()} bytes');
+      if (imageFiles.length > 15) {
+        throw Exception('Maximum of 15 face images allowed');
+      }
       
-      // Create multipart request for the profile with image
+      for (var imageFile in imageFiles) {
+        if (!await imageFile.exists()) {
+          throw Exception('Image file does not exist at path: ${imageFile.path}');
+        }
+      }
+      
+      // Create multipart request for the profile with images
       var request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/profiles/register_with_face/'));
       
       // Add auth headers
@@ -143,28 +211,38 @@ class ApiService {
       debugPrint('createProfile: Adding profile data');
       request.fields['name'] = profile.name;
       request.fields['email'] = profile.email;
-      request.fields['blood_group'] = profile.bloodGroup;
       request.fields['reg_number'] = profile.regNumber;
-      request.fields['university'] = profile.university;
       
-      // Add ESP32 info if available
-      if (_esp32Url != null && _esp32Url!.isNotEmpty) {
-        debugPrint('createProfile: Using ESP32 camera: $_esp32Url');
-        request.fields['use_esp32'] = 'true';
-        request.fields['esp32_url'] = _esp32Url!;
+      // Optional fields
+      if (profile.bloodGroup.isNotEmpty) {
+        request.fields['blood_group'] = profile.bloodGroup;
+      }
+      if (profile.university.isNotEmpty) {
+        request.fields['university'] = profile.university;
       }
       
-      // Always add the image file
-      debugPrint('createProfile: Adding image from file: ${imageFile.path}');
+      // Add the first image file
+      final firstImageFile = imageFiles[0];
+      debugPrint('createProfile: Adding first image from file: ${firstImageFile.path}');
       try {
-        final bytes = await imageFile.readAsBytes();
+        final bytes = await firstImageFile.readAsBytes();
         debugPrint('createProfile: Successfully read ${bytes.length} bytes from image file');
         
+        // Add image with both field names
         request.files.add(
           http.MultipartFile.fromBytes(
             'image',
             bytes,
-            filename: imageFile.path.split('/').last,
+            filename: firstImageFile.path.split('/').last,
+            contentType: MediaType('image', 'jpeg'),
+          )
+        );
+        
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            'face_images',
+            bytes,
+            filename: firstImageFile.path.split('/').last,
             contentType: MediaType('image', 'jpeg'),
           )
         );
@@ -184,6 +262,15 @@ class ApiService {
       if (response.statusCode == 201) {
         final profileJson = jsonDecode(response.body);
         debugPrint('createProfile: Profile created successfully');
+        
+        // If there are more images, add them using addFaceImages
+        if (imageFiles.length > 1) {
+          debugPrint('createProfile: Adding remaining ${imageFiles.length - 1} images');
+          final createdProfile = Profile.fromJson(profileJson);
+          await addFaceImages(createdProfile.id!, imageFiles.sublist(1));
+          return createdProfile;
+        }
+        
         return Profile.fromJson(profileJson);
       } else {
         throw Exception('Failed to create profile: ${response.body}');
@@ -788,5 +875,167 @@ class ApiService {
     
     debugPrint('getEsp32CameraPreview: All endpoints failed');
     return null;
+  }
+
+  static Future<Profile> addFaceImages(String profileId, List<File> imageFiles) async {
+    debugPrint('addFaceImages: Starting to add face images for profile: $profileId');
+    try {
+      // Validate image files
+      if (imageFiles.isEmpty) {
+        throw Exception('At least one face image is required');
+      }
+      
+      if (imageFiles.length > 15) {
+        throw Exception('Maximum of 15 face images allowed');
+      }
+      
+      for (var imageFile in imageFiles) {
+        if (!await imageFile.exists()) {
+          throw Exception('Image file does not exist at path: ${imageFile.path}');
+        }
+      }
+      
+      // Create multipart request
+      var request = http.MultipartRequest(
+        'POST', 
+        Uri.parse('$_baseUrl/profiles/$profileId/add_face_images/')
+      );
+      
+      // Add auth headers
+      final headers = _getAuthHeaders(isMultipart: true);
+      request.headers.addAll(headers);
+      
+      // Add face images
+      for (var i = 0; i < imageFiles.length; i++) {
+        final imageFile = imageFiles[i];
+        debugPrint('addFaceImages: Adding image ${i + 1} from file: ${imageFile.path}');
+        try {
+          final bytes = await imageFile.readAsBytes();
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'face_images',
+              bytes,
+              filename: imageFile.path.split('/').last,
+              contentType: MediaType('image', 'jpeg'),
+            )
+          );
+        } catch (e) {
+          debugPrint('addFaceImages: Error reading image file: $e');
+          throw Exception('Error reading image file: $e');
+        }
+      }
+      
+      // Send request
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      debugPrint('addFaceImages: Response status: ${response.statusCode}');
+      debugPrint('addFaceImages: Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        // Get the updated profile after adding images
+        return await getProfileById(profileId);
+      } else {
+        // If we get a face detection error, try to add images one by one
+        if (response.statusCode == 400 && response.body.contains('No face detected')) {
+          debugPrint('addFaceImages: Face detection failed for batch, trying individual images');
+          
+          // Get the current profile
+          final currentProfile = await getProfileById(profileId);
+          
+          // Try to add each image individually
+          for (var i = 0; i < imageFiles.length; i++) {
+            final imageFile = imageFiles[i];
+            try {
+              debugPrint('addFaceImages: Trying to add image ${i + 1} individually');
+              
+              // Create new request for single image
+              var singleRequest = http.MultipartRequest(
+                'POST', 
+                Uri.parse('$_baseUrl/profiles/$profileId/add_face_images/')
+              );
+              singleRequest.headers.addAll(headers);
+              
+              final bytes = await imageFile.readAsBytes();
+              singleRequest.files.add(
+                http.MultipartFile.fromBytes(
+                  'face_images',
+                  bytes,
+                  filename: imageFile.path.split('/').last,
+                  contentType: MediaType('image', 'jpeg'),
+                )
+              );
+              
+              final singleStreamedResponse = await singleRequest.send();
+              final singleResponse = await http.Response.fromStream(singleStreamedResponse);
+              
+              if (singleResponse.statusCode != 200) {
+                debugPrint('addFaceImages: Failed to add image ${i + 1}: ${singleResponse.body}');
+                // Continue with next image
+                continue;
+              }
+            } catch (e) {
+              debugPrint('addFaceImages: Error adding image ${i + 1} individually: $e');
+              // Continue with next image
+              continue;
+            }
+          }
+          
+          // Return the updated profile after trying all images
+          return await getProfileById(profileId);
+        } else {
+          throw Exception('Failed to add face images: ${response.body}');
+        }
+      }
+    } catch (e) {
+      debugPrint('addFaceImages error: $e');
+      throw Exception('Error adding face images: $e');
+    }
+  }
+
+  // Check if an image contains a face
+  static Future<bool> checkFace(File imageFile) async {
+    debugPrint('checkFace: Checking image for face: ${imageFile.path}');
+    try {
+      // Create multipart request
+      var request = http.MultipartRequest(
+        'POST', 
+        Uri.parse('$_baseUrl/profiles/check_face/')
+      );
+      
+      // Add auth headers
+      final headers = _getAuthHeaders(isMultipart: true);
+      request.headers.addAll(headers);
+      
+      // Add image file
+      final bytes = await imageFile.readAsBytes();
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'image',
+          bytes,
+          filename: imageFile.path.split('/').last,
+          contentType: MediaType('image', 'jpeg'),
+        )
+      );
+      
+      // Send request
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      debugPrint('checkFace: Response status: ${response.statusCode}');
+      debugPrint('checkFace: Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final hasFace = data['has_face'] as bool;
+        debugPrint('checkFace: Image ${hasFace ? "contains" : "does not contain"} a face');
+        return hasFace;
+      } else {
+        throw Exception('Failed to check face: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('checkFace error: $e');
+      throw Exception('Error checking face: $e');
+    }
   }
 }

@@ -9,8 +9,12 @@ class Constants {
     if (Platform.isAndroid) {
       // Android emulator uses 10.0.2.2 to access host machine's localhost
       return 'http://10.0.2.2:8000/api';
+    } else if (Platform.isIOS) {
+      // iOS simulator
+      return 'http://127.0.0.1:8000/api';
     } else {
-      // iOS or other platforms
+      // For physical devices or other platforms, use the actual IP
+      // You can change this to your computer's IP address on the network
       return 'http://127.0.0.1:8000/api';
     }
   }

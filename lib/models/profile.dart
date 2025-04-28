@@ -1,3 +1,31 @@
+class FaceImage {
+  final String id;
+  final String image;
+  final DateTime createdAt;
+
+  FaceImage({
+    required this.id,
+    required this.image,
+    required this.createdAt,
+  });
+
+  factory FaceImage.fromJson(Map<String, dynamic> json) {
+    return FaceImage(
+      id: json['id'].toString(),
+      image: json['image'],
+      createdAt: DateTime.parse(json['created_at']),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'image': image,
+      'created_at': createdAt.toIso8601String(),
+    };
+  }
+}
+
 class Profile {
   final String id;
   final String name;
@@ -8,6 +36,7 @@ class Profile {
   final String imageUrl;
   final DateTime registrationDate;
   final bool isActive;
+  final List<FaceImage> faceImages;
 
   Profile({
     required this.id,
@@ -19,6 +48,7 @@ class Profile {
     required this.imageUrl,
     required this.registrationDate,
     this.isActive = true,
+    this.faceImages = const [],
   });
 
   factory Profile.fromJson(Map<String, dynamic> json) {
@@ -32,6 +62,9 @@ class Profile {
       imageUrl: json['image'] ?? '',
       registrationDate: DateTime.parse(json['registration_date']),
       isActive: json['is_active'] ?? true,
+      faceImages: (json['face_images'] as List?)
+          ?.map((faceImage) => FaceImage.fromJson(faceImage))
+          .toList() ?? [],
     );
   }
 
@@ -56,6 +89,7 @@ class Profile {
     String? university,
     String? imageUrl,
     bool? isActive,
+    List<FaceImage>? faceImages,
   }) {
     return Profile(
       id: this.id,
@@ -67,6 +101,7 @@ class Profile {
       imageUrl: imageUrl ?? this.imageUrl,
       registrationDate: this.registrationDate,
       isActive: isActive ?? this.isActive,
+      faceImages: faceImages ?? this.faceImages,
     );
   }
 }

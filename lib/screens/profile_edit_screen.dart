@@ -29,8 +29,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   final _regNumberController = TextEditingController();
   final _universityController = TextEditingController();
   
-  File? _imageFile;
+  List<File> _imageFiles = [];
   bool _isProcessing = false;
+  static const int maxImages = 15;
   
   // ESP32 Camera preview variables
   bool _showCameraPreview = false;
@@ -96,42 +97,90 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   Future<void> _pickImage(ImageSource source) async {
     try {
       final picker = ImagePicker();
-      final pickedFile = await picker.pickImage(
-        source: source,
+      final pickedFiles = await picker.pickMultiImage(
         maxWidth: 800,
         maxHeight: 800,
         imageQuality: 85,
       );
       
-      if (pickedFile != null) {
-        final File imageFile = File(pickedFile.path);
-        debugPrint('Image picked from: ${imageFile.path}');
+      if (pickedFiles.isNotEmpty) {
+        setState(() {
+          _isProcessing = true;
+        });
         
-        // Verify file exists and has content
-        if (await imageFile.exists()) {
-          final size = await imageFile.length();
-          debugPrint('Image size: $size bytes');
+        final List<File> validImageFiles = [];
+        
+        for (var pickedFile in pickedFiles) {
+          final File imageFile = File(pickedFile.path);
+          debugPrint('Image picked from: ${imageFile.path}');
           
-          if (size > 0) {
-            setState(() {
-              _imageFile = imageFile;
-            });
+          // Verify file exists and has content
+          if (await imageFile.exists()) {
+            final size = await imageFile.length();
+            debugPrint('Image size: $size bytes');
+            
+            if (size > 0) {
+              // Check if image contains a face
+              try {
+                final hasFace = await ApiService.checkFace(imageFile);
+                if (hasFace) {
+                  validImageFiles.add(imageFile);
+                } else {
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('No face detected in one of the selected images')),
+                    );
+                  }
+                }
+              } catch (e) {
+                debugPrint('Error checking face: $e');
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error checking face: $e')),
+                  );
+                }
+              }
+            } else {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('One of the selected images is empty')),
+                );
+              }
+            }
           } else {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Selected image is empty')),
-            );
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Could not access one of the selected images')),
+              );
+            }
           }
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not access the selected image')),
-          );
+        }
+        
+        if (mounted) {
+          setState(() {
+            if (validImageFiles.isNotEmpty) {
+              _imageFiles.addAll(validImageFiles);
+              if (_imageFiles.length > maxImages) {
+                _imageFiles = _imageFiles.sublist(0, maxImages);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('Maximum of $maxImages images allowed. Extra images were discarded.')),
+                );
+              }
+            }
+            _isProcessing = false;
+          });
         }
       }
     } catch (e) {
-      debugPrint('Error picking image: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error picking image: $e')),
-      );
+      debugPrint('Error picking images: $e');
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error picking images: $e')),
+        );
+      }
     }
   }
   
@@ -589,12 +638,32 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           debugPrint('ESP32 image size: $size bytes');
           
           if (size > 0) {
-            setState(() {
-              _imageFile = imageFile;
-              _isProcessing = false;
-              _showCameraPreview = false; // Close preview after capture
-            });
-            _stopCameraPreview();
+            // Check if image contains a face
+            try {
+              final hasFace = await ApiService.checkFace(imageFile);
+              if (hasFace) {
+                setState(() {
+                  _imageFiles.add(imageFile);
+                  _isProcessing = false;
+                  _showCameraPreview = false; // Close preview after capture
+                });
+                _stopCameraPreview();
+              } else {
+                setState(() {
+                  _isProcessing = false;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('No face detected in the captured image')),
+                );
+              }
+            } catch (e) {
+              setState(() {
+                _isProcessing = false;
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Error checking face: $e')),
+              );
+            }
           } else {
             setState(() {
               _isProcessing = false;
@@ -638,22 +707,42 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           debugPrint('ESP32 image size: $size bytes');
           
           if (size > 0) {
-            // Copy to a more permanent location
-            final appDir = await getApplicationDocumentsDirectory();
-            final timestamp = DateTime.now().millisecondsSinceEpoch;
-            final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
-            
-            // Copy file to permanent location
-            final bytes = await tempFile.readAsBytes();
-            final permanentFile = File(imagePath);
-            await permanentFile.writeAsBytes(bytes);
-            
-            debugPrint('Image copied to permanent location: ${permanentFile.path}');
-            
-            setState(() {
-              _imageFile = permanentFile;
-              _isProcessing = false;
-            });
+            // Check if image contains a face
+            try {
+              final hasFace = await ApiService.checkFace(tempFile);
+              if (hasFace) {
+                // Copy to a more permanent location
+                final appDir = await getApplicationDocumentsDirectory();
+                final timestamp = DateTime.now().millisecondsSinceEpoch;
+                final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
+                
+                // Copy file to permanent location
+                final bytes = await tempFile.readAsBytes();
+                final permanentFile = File(imagePath);
+                await permanentFile.writeAsBytes(bytes);
+                
+                debugPrint('Image copied to permanent location: ${permanentFile.path}');
+                
+                setState(() {
+                  _imageFiles.add(permanentFile);
+                  _isProcessing = false;
+                });
+              } else {
+                setState(() {
+                  _isProcessing = false;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('No face detected in the captured image')),
+                );
+              }
+            } catch (e) {
+              setState(() {
+                _isProcessing = false;
+              });
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Error checking face: $e')),
+              );
+            }
           } else {
             setState(() {
               _isProcessing = false;
@@ -687,186 +776,116 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     if (!_formKey.currentState!.validate()) {
       return;
     }
-    
-    if (_imageFile == null && widget.profile == null) {
+
+    if (_imageFiles.isEmpty && widget.profile == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select or capture an image')),
+        const SnackBar(content: Text('Please add at least one face image')),
       );
       return;
     }
-    
-    // Check if image file exists
-    if (_imageFile != null) {
-      try {
-        if (!await _imageFile!.exists()) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Image file not found: ${_imageFile!.path}')),
-          );
-          return;
-        }
-        
-        final size = await _imageFile!.length();
-        debugPrint('Image file size: $size bytes');
-        
-        if (size == 0) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Image file is empty. Please select another image.')),
-          );
-          return;
-        }
-      } catch (e) {
-        debugPrint('Error checking image file: $e');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error with image file: $e')),
-        );
-        return;
-      }
-    }
-    
+
     setState(() {
       _isProcessing = true;
     });
-    
+
     try {
-      final profileProvider = Provider.of<ProfileProvider>(context, listen: false);
-      
+      final profile = Profile(
+        id: widget.profile?.id ?? '', // Empty string for new profiles
+        name: _nameController.text,
+        email: _emailController.text,
+        bloodGroup: _bloodGroupController.text,
+        regNumber: _regNumberController.text,
+        university: _universityController.text,
+        imageUrl: widget.profile?.imageUrl ?? '', // Empty string for new profiles
+        registrationDate: widget.profile?.registrationDate ?? DateTime.now(), // Current date for new profiles
+        isActive: widget.profile?.isActive ?? true,
+      );
+
       if (widget.profile == null) {
-        // Create new profile
-        debugPrint('ProfileEditScreen: Creating new profile');
-        final newProfile = Profile(
-          id: '', // Will be assigned by backend
-          name: _nameController.text,
-          email: _emailController.text,
-          bloodGroup: _bloodGroupController.text,
-          regNumber: _regNumberController.text,
-          university: _universityController.text,
-          imageUrl: '', // Will be assigned by backend
-          registrationDate: DateTime.now(),
-          isActive: true, // Explicitly set profile to active
+        // Creating new profile
+        await ApiService.createProfile(profile, _imageFiles);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Profile created successfully')),
         );
-        
-        debugPrint('ProfileEditScreen: Calling profileProvider.createProfile');
-        final success = await profileProvider.createProfile(newProfile, _imageFile!);
-        
-        if (success) {
-          debugPrint('ProfileEditScreen: Profile created successfully');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Profile created successfully')),
-          );
-          Navigator.pop(context);
-        } else {
-          debugPrint('ProfileEditScreen: Profile creation failed');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to create profile: ${profileProvider.error}')),
-          );
-        }
       } else {
-        // Update existing profile
-        debugPrint('ProfileEditScreen: Updating existing profile ${widget.profile!.id}');
-        final updatedProfile = widget.profile!.copyWith(
-          name: _nameController.text,
-          email: _emailController.text,
-          bloodGroup: _bloodGroupController.text,
-          regNumber: _regNumberController.text,
-          university: _universityController.text,
-        );
-        
-        // Only pass the image file if a new one was selected
-        File? imageToUpload = _imageFile;
-        if (imageToUpload != null) {
-          debugPrint('ProfileEditScreen: New image selected for update: ${imageToUpload.path}');
-        } else {
-          debugPrint('ProfileEditScreen: No new image selected, using existing image');
+        // Updating existing profile
+        if (_imageFiles.isNotEmpty) {
+          await ApiService.addFaceImages(profile.id!, _imageFiles);
         }
-        
-        debugPrint('ProfileEditScreen: Calling profileProvider.updateProfile');
-        final success = await profileProvider.updateProfile(
-          updatedProfile, 
-          imageFile: imageToUpload,
+        await ApiService.updateProfile(profile);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Profile updated successfully')),
         );
-        
-        if (success) {
-          debugPrint('ProfileEditScreen: Profile updated successfully');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Profile updated successfully')),
-          );
-          Navigator.pop(context);
-        } else {
-          debugPrint('ProfileEditScreen: Profile update failed');
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to update profile: ${profileProvider.error}')),
-          );
-        }
+      }
+
+      if (mounted) {
+        Navigator.pop(context);
       }
     } catch (e) {
-      debugPrint('ProfileEditScreen error: $e');
+      debugPrint('Error saving profile: $e');
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
+        SnackBar(content: Text('Error saving profile: $e')),
       );
     } finally {
-      setState(() {
-        _isProcessing = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
     }
   }
   
-  void _restartCameraPreview() {
-    _stopCameraPreview();
-    Future.delayed(Duration(milliseconds: 500), () {
-      if (mounted) _startCameraPreview();
-    });
-  }
-  
-  // Build camera preview with simplified approach
-  Widget _buildCameraPreview() {
-    if (_isLoadingPreview) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    
-    // Use a simple direct image display approach
-    if (_previewImageBytes != null) {
-      debugPrint('Profile screen: Using simplified image display');
-      
-      return Container(
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Center(
-          child: Image.memory(
-            _previewImageBytes!,
-            fit: BoxFit.contain,
-            gaplessPlayback: true,
-            // Force rebuild on each render
-            key: ValueKey('img-${DateTime.now().millisecondsSinceEpoch}'),
-            // Add error handler
-            errorBuilder: (context, error, stackTrace) {
-              debugPrint('Profile screen: Error rendering image: $error');
-              return Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    const Icon(Icons.broken_image, size: 48, color: Colors.red),
-                    const SizedBox(height: 16),
-                    const Text('Invalid image data', style: TextStyle(color: Colors.white)),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: _restartCameraPreview,
-                      child: const Text('Retry Connection'),
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
+  Widget _buildImagePreview() {
+    if (_imageFiles.isEmpty) {
+      return const Center(
+        child: Text('No images selected'),
       );
     }
-    
-    return const Center(
-      child: Text('Connecting to camera...', 
-        style: TextStyle(color: Colors.grey),
-      ),
+
+    return Column(
+      children: [
+        GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 8,
+            mainAxisSpacing: 8,
+          ),
+          itemCount: _imageFiles.length,
+          itemBuilder: (context, index) {
+            return Stack(
+              children: [
+                Image.file(
+                  _imageFiles[index],
+                  fit: BoxFit.cover,
+                ),
+                Positioned(
+                  right: 0,
+                  top: 0,
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.red),
+                    onPressed: () {
+                      setState(() {
+                        _imageFiles.removeAt(index);
+                      });
+                    },
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+        if (_imageFiles.length < maxImages)
+          Padding(
+            padding: const EdgeInsets.only(top: 16.0),
+            child: Text(
+              'You can add ${maxImages - _imageFiles.length} more images',
+              style: Theme.of(context).textTheme.bodySmall,
+              textAlign: TextAlign.center,
+            ),
+          ),
+      ],
     );
   }
   
@@ -880,7 +899,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.profile == null ? 'Add Profile' : 'Edit Profile'),
+        title: Text(widget.profile == null ? 'Create Profile' : 'Edit Profile'),
       ),
       body: _isProcessing
           ? const Center(child: CircularProgressIndicator())
@@ -891,130 +910,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Profile image selection or camera preview
-                    if (_showCameraPreview) ...[
-                      Container(
-                        height: 250,
-                        decoration: BoxDecoration(
-                          border: Border.all(color: Colors.grey),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: FadeTransition(
-                          opacity: _fadeController,
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: _buildCameraPreview(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          ElevatedButton.icon(
-                            onPressed: _captureFromESP32,
-                            icon: const Icon(Icons.camera),
-                            label: const Text('Capture'),
-                          ),
-                          ElevatedButton.icon(
-                            onPressed: _toggleESP32Camera,
-                            icon: const Icon(Icons.close),
-                            label: const Text('Close Camera'),
-                          ),
-                        ],
-                      ),
-                    ] else ...[
-                      Center(
-                        child: GestureDetector(
-                          onTap: () {
-                            showModalBottomSheet(
-                              context: context,
-                              builder: (BuildContext context) {
-                                return SafeArea(
-                                  child: Wrap(
-                                    children: <Widget>[
-                                      ListTile(
-                                        leading: const Icon(Icons.photo_library),
-                                        title: const Text('Photo Library'),
-                                        onTap: () {
-                                          Navigator.pop(context);
-                                          _pickImage(ImageSource.gallery);
-                                        },
-                                      ),
-                                      ListTile(
-                                        leading: const Icon(Icons.photo_camera),
-                                        title: const Text('Camera'),
-                                        onTap: () {
-                                          Navigator.pop(context);
-                                          _pickImage(ImageSource.camera);
-                                        },
-                                      ),
-                                      ListTile(
-                                        leading: const Icon(Icons.videocam),
-                                        title: const Text('ESP32 Camera'),
-                                        onTap: () {
-                                          Navigator.pop(context);
-                                          _toggleESP32Camera();
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            );
-                          },
-                          child: Container(
-                            width: 150,
-                            height: 150,
-                            decoration: BoxDecoration(
-                              color: Colors.grey.shade200,
-                              shape: BoxShape.circle,
-                            ),
-                            child: _imageFile != null
-                                ? ClipOval(
-                                    child: Image.file(
-                                      _imageFile!,
-                                      width: 150,
-                                      height: 150,
-                                      fit: BoxFit.cover,
-                                    ),
-                                  )
-                                : widget.profile != null
-                                    ? ClipOval(
-                                        child: Image.network(
-                                          widget.profile!.imageUrl,
-                                          width: 150,
-                                          height: 150,
-                                          fit: BoxFit.cover,
-                                          errorBuilder: (context, error, stackTrace) {
-                                            return Center(
-                                              child: Text(
-                                                widget.profile!.name[0],
-                                                style: const TextStyle(fontSize: 50),
-                                              ),
-                                            );
-                                          },
-                                        ),
-                                      )
-                                    : const Icon(
-                                        Icons.add_a_photo,
-                                        size: 50,
-                                        color: Colors.grey,
-                                      ),
-                          ),
-                        ),
-                      ),
-                    ],
-                    const SizedBox(height: 24),
                     TextFormField(
                       controller: _nameController,
-                      decoration: const InputDecoration(
-                        labelText: 'Full Name',
-                        border: OutlineInputBorder(),
-                      ),
+                      decoration: const InputDecoration(labelText: 'Name'),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
-                          return 'Please enter name';
+                          return 'Please enter a name';
                         }
                         return null;
                       },
@@ -1022,35 +923,21 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: _emailController,
-                      decoration: const InputDecoration(
-                        labelText: 'Email',
-                        border: OutlineInputBorder(),
-                      ),
+                      decoration: const InputDecoration(labelText: 'Email'),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
-                          return 'Please enter email';
+                          return 'Please enter an email';
                         }
                         return null;
                       },
                     ),
                     const SizedBox(height: 16),
                     TextFormField(
-                      controller: _bloodGroupController,
-                      decoration: const InputDecoration(
-                        labelText: 'Blood Group',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextFormField(
                       controller: _regNumberController,
-                      decoration: const InputDecoration(
-                        labelText: 'Registration Number',
-                        border: OutlineInputBorder(),
-                      ),
+                      decoration: const InputDecoration(labelText: 'Registration Number'),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
-                          return 'Please enter registration number';
+                          return 'Please enter a registration number';
                         }
                         return null;
                       },
@@ -1058,18 +945,100 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: _universityController,
-                      decoration: const InputDecoration(
-                        labelText: 'University',
-                        border: OutlineInputBorder(),
-                      ),
+                      decoration: const InputDecoration(labelText: 'University'),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter a university';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      controller: _bloodGroupController,
+                      decoration: const InputDecoration(labelText: 'Blood Group'),
+                      validator: (value) {
+                        if (value == null || value.isEmpty) {
+                          return 'Please enter a blood group';
+                        }
+                        return null;
+                      },
                     ),
                     const SizedBox(height: 24),
-                    ElevatedButton(
-                      onPressed: _saveProfile,
-                      child: Text(widget.profile == null ? 'Create Profile' : 'Update Profile'),
-                      style: ElevatedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 16),
+                    Text(
+                      'Face Images (${_imageFiles.length}/$maxImages)',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    _buildImagePreview(),
+                    const SizedBox(height: 16),
+                    if (_showCameraPreview)
+                      Container(
+                        height: 200,
+                        decoration: BoxDecoration(
+                          border: Border.all(color: Colors.grey),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: _previewImageBytes != null
+                            ? Image.memory(
+                                _previewImageBytes!,
+                                fit: BoxFit.cover,
+                              )
+                            : const Center(child: CircularProgressIndicator()),
                       ),
+                    const SizedBox(height: 16),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: [
+                        SizedBox(
+                          width: 120,
+                          child: ElevatedButton.icon(
+                            onPressed: _imageFiles.length >= maxImages
+                                ? null
+                                : () => _pickImage(ImageSource.gallery),
+                            icon: const Icon(Icons.photo_library),
+                            label: const Text('Gallery'),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 120,
+                          child: ElevatedButton.icon(
+                            onPressed: _imageFiles.length >= maxImages
+                                ? null
+                                : () => _pickImage(ImageSource.camera),
+                            icon: const Icon(Icons.camera_alt),
+                            label: const Text('Camera'),
+                          ),
+                        ),
+                        SizedBox(
+                          width: 120,
+                          child: ElevatedButton.icon(
+                            onPressed: _imageFiles.length >= maxImages
+                                ? null
+                                : () => _toggleESP32Camera(),
+                            icon: const Icon(Icons.camera),
+                            label: Text(_showCameraPreview ? 'Stop ESP32' : 'ESP32 Camera'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (_showCameraPreview)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 16.0),
+                        child: ElevatedButton.icon(
+                          onPressed: _captureFromESP32,
+                          icon: const Icon(Icons.camera_alt),
+                          label: const Text('Capture from ESP32'),
+                        ),
+                      ),
+                    const SizedBox(height: 24),
+                    ElevatedButton(
+                      onPressed: _isProcessing ? null : _saveProfile,
+                      child: _isProcessing
+                          ? const CircularProgressIndicator()
+                          : Text(widget.profile == null ? 'Create Profile' : 'Update Profile'),
                     ),
                   ],
                 ),
