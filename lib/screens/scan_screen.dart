@@ -684,7 +684,22 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
               ),
             ],
           ),
-        );
+        ).then((_) {
+          // Ensure we're ready for the next scan
+          if (mounted) {
+            setState(() {
+              _isFaceDetected = false;
+              _faceDetectionMessage = 'Ready to scan';
+            });
+          }
+        });
+        
+        // Auto-dismiss dialog after 3 seconds
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        });
       }
     } catch (e) {
       debugPrint('_captureScan error: $e');
@@ -923,7 +938,22 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
               ),
             ],
           ),
-        );
+        ).then((_) {
+          // Ensure we're ready for the next scan
+          if (mounted) {
+            setState(() {
+              _isFaceDetected = false;
+              _faceDetectionMessage = 'Ready to scan';
+            });
+          }
+        });
+        
+        // Auto-dismiss dialog after 3 seconds
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        });
       }
     } catch (e) {
       debugPrint('_singleCapture error: $e');
