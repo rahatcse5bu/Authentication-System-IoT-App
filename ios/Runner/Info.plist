@@ -28,6 +28,8 @@
 	<string>This app needs camera access to detect faces</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>This app needs photos access to get profile images</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>This app needs microphone access to record voice for attendance</string>
 	<key>io.flutter.embedded_views_preview</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

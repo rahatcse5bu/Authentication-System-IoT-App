@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:attendance/providers/auth_provider.dart';
 import 'package:attendance/providers/settings_provider.dart';
 import 'package:attendance/providers/profile_provider.dart';
@@ -37,7 +38,23 @@ void main() async {
   // Initialize API Service
   await ApiService.initialize();
   
+  // Request permissions at app startup (optional)
+  await requestInitialPermissions();
+  
   runApp(MyApp());
+}
+
+Future<void> requestInitialPermissions() async {
+  try {
+    // Request permissions at app startup
+    await [
+      Permission.camera,
+      Permission.microphone,
+      Permission.storage,
+    ].request();
+  } catch (e) {
+    print('Error requesting permissions: $e');
+  }
 }
 
 class MyApp extends StatelessWidget {

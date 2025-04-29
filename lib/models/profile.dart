@@ -37,6 +37,7 @@ class Profile {
   final DateTime registrationDate;
   final bool isActive;
   final List<FaceImage> faceImages;
+  final bool hasVoiceSample;
 
   Profile({
     required this.id,
@@ -49,6 +50,7 @@ class Profile {
     required this.registrationDate,
     this.isActive = true,
     this.faceImages = const [],
+    this.hasVoiceSample = false,
   });
 
   factory Profile.fromJson(Map<String, dynamic> json) {
@@ -65,6 +67,7 @@ class Profile {
       faceImages: (json['face_images'] as List?)
           ?.map((faceImage) => FaceImage.fromJson(faceImage))
           .toList() ?? [],
+      hasVoiceSample: json['has_voice_sample'] ?? false,
     );
   }
 
@@ -78,6 +81,7 @@ class Profile {
       'image': imageUrl,
       'registration_date': registrationDate.toIso8601String(),
       'is_active': isActive,
+      'has_voice_sample': hasVoiceSample,
     };
   }
 
@@ -90,6 +94,7 @@ class Profile {
     String? imageUrl,
     bool? isActive,
     List<FaceImage>? faceImages,
+    bool? hasVoiceSample,
   }) {
     return Profile(
       id: this.id,
@@ -102,6 +107,7 @@ class Profile {
       registrationDate: this.registrationDate,
       isActive: isActive ?? this.isActive,
       faceImages: faceImages ?? this.faceImages,
+      hasVoiceSample: hasVoiceSample ?? this.hasVoiceSample,
     );
   }
 }

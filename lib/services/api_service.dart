@@ -23,49 +23,73 @@ class ApiService {
   static String get _baseUrl => Constants.baseApiUrl;
   static String? _token;
   static String? _esp32Url;
+  static SharedPreferences? _sharedPreferences;
+  // Default ESP32 camera URL to use when none is configured
+  static const String defaultEsp32Url = "http://192.168.1.100:81";
 
   // Initialize with saved settings
   static Future<void> initialize() async {
-    debugPrint('ApiService.initialize: Starting initialization');
-    debugPrint('ApiService.initialize: Base URL: $_baseUrl');
+    debugPrint('Initializing ApiService');
+    
     try {
-      final prefs = await SharedPreferences.getInstance();
-      _token = prefs.getString('auth_token');
-      _esp32Url = prefs.getString('esp32_url');
+      // Initialize SharedPreferences
+      _sharedPreferences = await _ensureSharedPreferences();
       
-      debugPrint('ApiService.initialize: Loaded token and ESP32 URL from preferences');
-      debugPrint('ApiService.initialize: ESP32 URL set to: $_esp32Url');
+      // Try to load ESP32 URL from preferences
+      _esp32Url = _sharedPreferences!.getString('esp32_url') ?? defaultEsp32Url;
+      debugPrint('ESP32 URL: $_esp32Url');
       
-      if (_token != null) {
-        debugPrint('ApiService.initialize: Authorization token loaded');
-      } else {
-        debugPrint('ApiService.initialize: No authorization token found');
-      }
-
-      // Test connection to the server
-      try {
-        final response = await http.get(Uri.parse('$_baseUrl/')).timeout(
-          const Duration(seconds: 5),
-          onTimeout: () {
-            throw TimeoutException('Server connection test timed out');
-          },
-        );
-        debugPrint('ApiService.initialize: Server connection test successful');
-        debugPrint('ApiService.initialize: Server response: ${response.statusCode}');
-      } catch (e) {
-        debugPrint('ApiService.initialize: Server connection test failed: $e');
-        throw Exception('Could not connect to server at $_baseUrl. Please check if the server is running.');
-      }
+      // Test server connection
+      await testServerConnection();
+      
+      // Load token
+      await _getAuthToken();
     } catch (e) {
-      debugPrint('ApiService.initialize error: $e');
-      rethrow;
+      debugPrint('Error initializing ApiService: $e');
     }
+  }
+
+  /// Tests the connection to the server
+  static Future<void> testServerConnection() async {
+    try {
+      final response = await http.get(Uri.parse('$_baseUrl/')).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {
+          throw TimeoutException('Server connection test timed out');
+        },
+      );
+      debugPrint('Server connection test successful: ${response.statusCode}');
+    } catch (e) {
+      debugPrint('Server connection test failed: $e');
+      throw Exception('Could not connect to server at $_baseUrl');
+    }
+  }
+
+  // Ensure shared preferences are initialized
+  static Future<SharedPreferences> _ensureSharedPreferences() async {
+    if (_sharedPreferences == null) {
+      _sharedPreferences = await SharedPreferences.getInstance();
+    }
+    return _sharedPreferences!;
+  }
+
+  // Public method to ensure SharedPreferences is initialized
+  static Future<SharedPreferences> ensureSharedPreferences() async {
+    return _ensureSharedPreferences();
+  }
+
+  // Get auth token synchronously, ensuring SharedPreferences is initialized
+  static String? _getAuthTokenSync() {
+    if (_token == null && _sharedPreferences != null) {
+      _token = _sharedPreferences!.getString('auth_token');
+    }
+    return _token;
   }
 
   // Configure ESP32 Camera URL
   static Future<void> setEsp32Url(String url) async {
     _esp32Url = url;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _ensureSharedPreferences();
     await prefs.setString('esp32_url', url);
   }
 
@@ -90,7 +114,7 @@ class ApiService {
         debugPrint('Login successful, token received');
         
         // Save token
-        final prefs = await SharedPreferences.getInstance();
+        final prefs = await _ensureSharedPreferences();
         await prefs.setString('auth_token', _token!);
         await prefs.setString('username', username);
         
@@ -107,7 +131,7 @@ class ApiService {
 
   static Future<void> logout() async {
     _token = null;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _ensureSharedPreferences();
     await prefs.remove('auth_token');
     await prefs.remove('username');
   }
@@ -282,27 +306,32 @@ class ApiService {
     }
   }
 
-  static Future<Profile> updateProfile(Profile profile, {File? imageFile}) async {
-    debugPrint('updateProfile: Starting profile update for ID: ${profile.id}');
+  static Future<Profile> updateProfile(
+    String id, {
+    String? name,
+    String? email,
+    String? bloodGroup,
+    String? regNumber,
+    String? university,
+    bool? isActive,
+    File? imageFile,
+  }) async {
+    debugPrint('updateProfile: Starting profile update for ID: $id');
     try {
-      // Decide whether to use PATCH (no image update) or PUT (with image update)
-      final String method = imageFile == null ? 'PATCH' : 'PUT';
-      debugPrint('updateProfile: Using $method method for update');
+      // Prepare the data for update
+      final Map<String, dynamic> data = {};
+      if (name != null) data['name'] = name;
+      if (email != null) data['email'] = email;
+      if (bloodGroup != null) data['blood_group'] = bloodGroup;
+      if (regNumber != null) data['reg_number'] = regNumber;
+      if (university != null) data['university'] = university;
+      if (isActive != null) data['is_active'] = isActive;
       
       // For PATCH with no image, use regular JSON request
-      if (method == 'PATCH' && imageFile == null) {
-        final Map<String, dynamic> data = {
-          'name': profile.name,
-          'email': profile.email,
-          'blood_group': profile.bloodGroup,
-          'reg_number': profile.regNumber,
-          'university': profile.university,
-          'is_active': profile.isActive,
-        };
-        
+      if (imageFile == null) {
         debugPrint('updateProfile: Sending PATCH request with data: $data');
         final response = await http.patch(
-          Uri.parse('$_baseUrl/profiles/${profile.id}/'),
+          Uri.parse('$_baseUrl/profiles/$id/'),
           headers: _getAuthHeaders(),
           body: jsonEncode(data),
         );
@@ -321,8 +350,8 @@ class ApiService {
       
       // Otherwise proceed with multipart request for image upload
       var request = http.MultipartRequest(
-        method, 
-        Uri.parse('$_baseUrl/profiles/${profile.id}/')
+        'PUT', 
+        Uri.parse('$_baseUrl/profiles/$id/')
       );
       
       // Add auth headers
@@ -332,12 +361,12 @@ class ApiService {
       
       // Add profile data
       debugPrint('updateProfile: Adding profile data');
-      request.fields['name'] = profile.name;
-      request.fields['email'] = profile.email;
-      request.fields['blood_group'] = profile.bloodGroup;
-      request.fields['reg_number'] = profile.regNumber;
-      request.fields['university'] = profile.university;
-      request.fields['is_active'] = profile.isActive.toString();
+      if (name != null) request.fields['name'] = name;
+      if (email != null) request.fields['email'] = email;
+      if (bloodGroup != null) request.fields['blood_group'] = bloodGroup;
+      if (regNumber != null) request.fields['reg_number'] = regNumber;
+      if (university != null) request.fields['university'] = university;
+      if (isActive != null) request.fields['is_active'] = isActive.toString();
       
       // Add ESP32 info if available
       if (_esp32Url != null && _esp32Url!.isNotEmpty) {
@@ -371,9 +400,6 @@ class ApiService {
           debugPrint('updateProfile: Image file does not exist at path: ${imageFile.path}');
           throw Exception('Image file does not exist at path: ${imageFile.path}');
         }
-      } else {
-        debugPrint('updateProfile: No new image provided, using existing image');
-        // No image field is sent, so the server will keep the existing image
       }
       
       // Send request
@@ -780,22 +806,22 @@ class ApiService {
   }
 
   // Helpers
-  static Map<String, String> _getAuthHeaders({bool isMultipart = false}) {
-    if (_token == null) {
-      throw Exception('Not authenticated');
+  static Map<String, String> _getAuthHeaders({bool excludeContentType = false, bool isMultipart = false}) {
+    final token = _getAuthTokenSync();
+    
+    if (token == null) {
+      throw Exception('Authentication token is missing. Please log in again.');
     }
     
-    if (isMultipart) {
-      // For multipart requests, we should not set content-type as it will be set automatically
-      return {
-        'Authorization': 'Bearer $_token',
-      };
-    } else {
-      return {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer $_token',
-      };
+    final headers = <String, String>{
+      'Authorization': 'Bearer $token',
+    };
+    
+    if (!excludeContentType && !isMultipart) {
+      headers['Content-Type'] = 'application/json';
     }
+    
+    return headers;
   }
 
   // Helper method to get the authentication token
@@ -807,7 +833,7 @@ class ApiService {
     
     // Try to load token from preferences
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await _ensureSharedPreferences();
       _token = prefs.getString('auth_token');
       return _token;
     } catch (e) {
@@ -1001,6 +1027,332 @@ class ApiService {
     } catch (e) {
       debugPrint('checkFace error: $e');
       return false;
+    }
+  }
+
+  // Update profile with voice sample
+  static Future<Profile> updateProfileVoice(String id, File voiceFile) async {
+    try {
+      debugPrint('updateProfileVoice: Uploading voice sample for profile $id');
+      
+      // Create a multipart request
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_baseUrl/profiles/$id/update_voice/'),
+      );
+      
+      // Add auth headers
+      request.headers.addAll(_getAuthHeaders(excludeContentType: true));
+      
+      // Add the voice file
+      request.files.add(await http.MultipartFile.fromPath(
+        'voice_sample', 
+        voiceFile.path,
+        contentType: MediaType('audio', 'wav'),
+      ));
+      
+      // Send the request
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      
+      if (response.statusCode == 200) {
+        final profileJson = jsonDecode(responseBody);
+        debugPrint('updateProfileVoice: Voice sample updated successfully');
+        return Profile.fromJson(profileJson);
+      } else {
+        throw Exception('Failed to update voice sample: $responseBody');
+      }
+    } catch (e) {
+      debugPrint('updateProfileVoice error: $e');
+      throw Exception('Error updating voice sample: $e');
+    }
+  }
+  
+  // Register profile with face and optional voice
+  static Future<Profile> registerProfileWithFaceAndVoice(
+    String name, 
+    String email, 
+    String regNumber, 
+    String university, 
+    String bloodGroup, 
+    File imageFile, 
+    [File? voiceFile]
+  ) async {
+    try {
+      debugPrint('registerProfileWithFaceAndVoice: Registering new profile');
+      
+      // Create a multipart request
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_baseUrl/profiles/register_with_face/'),
+      );
+      
+      // Add auth headers
+      request.headers.addAll(_getAuthHeaders(excludeContentType: true));
+      
+      // Add profile fields
+      request.fields['name'] = name;
+      request.fields['email'] = email;
+      request.fields['reg_number'] = regNumber;
+      request.fields['university'] = university;
+      request.fields['blood_group'] = bloodGroup;
+      
+      // Add the image file
+      request.files.add(await http.MultipartFile.fromPath(
+        'image', 
+        imageFile.path,
+        contentType: MediaType('image', 'jpeg'),
+      ));
+      
+      // Add the voice file if provided
+      if (voiceFile != null) {
+        request.files.add(await http.MultipartFile.fromPath(
+          'voice_sample', 
+          voiceFile.path,
+          contentType: MediaType('audio', 'wav'),
+        ));
+      }
+      
+      // Send the request
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      
+      if (response.statusCode == 201) {
+        final profileJson = jsonDecode(responseBody);
+        debugPrint('registerProfileWithFaceAndVoice: Profile registered successfully');
+        return Profile.fromJson(profileJson);
+      } else {
+        throw Exception('Failed to register profile: $responseBody');
+      }
+    } catch (e) {
+      debugPrint('registerProfileWithFaceAndVoice error: $e');
+      throw Exception('Error registering profile: $e');
+    }
+  }
+
+  // Mark attendance with voice only
+  static Future<Map<String, dynamic>> markAttendanceWithVoice(File voiceFile) async {
+    try {
+      debugPrint('markAttendanceWithVoice: Marking attendance with voice');
+      final token = await _getAuthToken();
+      
+      if (token == null) {
+        debugPrint('markAttendanceWithVoice: Authentication token is null. Please log in again.');
+        throw Exception('Authentication required. Please log in again.');
+      }
+      
+      // Create a multipart request
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_baseUrl/attendance/mark_attendance/'),
+      );
+      
+      // Add auth headers
+      request.headers['Authorization'] = 'Bearer $token';
+      
+      // Add verification method
+      request.fields['verification_method'] = 'voice';
+      
+      // Add the voice file
+      request.files.add(await http.MultipartFile.fromPath(
+        'voice_sample', 
+        voiceFile.path,
+        contentType: MediaType('audio', 'wav'),
+      ));
+      
+      // Send the request
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final Map<String, dynamic> responseData = jsonDecode(responseBody);
+        debugPrint('markAttendanceWithVoice: Success');
+        
+        // Process the response
+        if (responseData.containsKey('results') && responseData['results'] is List && responseData['results'].isNotEmpty) {
+          final firstResult = responseData['results'][0];
+          
+          final String profileName = firstResult['name'] ?? 'Unknown';
+          final String regNumber = firstResult['reg_number'] ?? '';
+          final String action = firstResult['action'] ?? 'time_in';
+          final String time = firstResult['time'] ?? DateTime.now().toIso8601String();
+          final String verificationMethod = firstResult['verification_method'] ?? 'voice';
+          
+          return {
+            'success': true,
+            'profile_name': profileName,
+            'reg_number': regNumber,
+            'action': action,
+            'time': time,
+            'verification_method': verificationMethod,
+            'raw_response': responseData
+          };
+        } else {
+          // Return a generic success response
+          return {
+            'success': true,
+            'profile_name': 'Unknown',
+            'timestamp': DateTime.now().toString(),
+            'raw_response': responseData
+          };
+        }
+      } else {
+        throw Exception('Failed to mark attendance: $responseBody');
+      }
+    } catch (e) {
+      debugPrint('markAttendanceWithVoice error: $e');
+      throw Exception('Error marking attendance with voice: $e');
+    }
+  }
+  
+  // Mark attendance with both face and voice
+  static Future<Map<String, dynamic>> markAttendanceWithFaceAndVoice(File imageFile, File voiceFile, String? esp32Url) async {
+    try {
+      debugPrint('markAttendanceWithFaceAndVoice: Marking attendance with face and voice');
+      final token = await _getAuthToken();
+      
+      if (token == null) {
+        debugPrint('markAttendanceWithFaceAndVoice: Authentication token is null. Please log in again.');
+        throw Exception('Authentication required. Please log in again.');
+      }
+      
+      // Create a multipart request
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_baseUrl/attendance/mark_attendance/'),
+      );
+      
+      // Add auth headers
+      request.headers['Authorization'] = 'Bearer $token';
+      
+      // Add verification method
+      request.fields['verification_method'] = 'both';
+      
+      // Add the image file
+      request.files.add(await http.MultipartFile.fromPath(
+        'image', 
+        imageFile.path,
+        contentType: MediaType('image', 'jpeg'),
+      ));
+      
+      // Add the voice file
+      request.files.add(await http.MultipartFile.fromPath(
+        'voice_sample', 
+        voiceFile.path,
+        contentType: MediaType('audio', 'wav'),
+      ));
+      
+      // Send the request
+      final response = await request.send();
+      final responseBody = await response.stream.bytesToString();
+      
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final Map<String, dynamic> responseData = jsonDecode(responseBody);
+        debugPrint('markAttendanceWithFaceAndVoice: Success');
+        
+        // Process the response
+        if (responseData.containsKey('results') && responseData['results'] is List && responseData['results'].isNotEmpty) {
+          final firstResult = responseData['results'][0];
+          
+          final String profileName = firstResult['name'] ?? 'Unknown';
+          final String regNumber = firstResult['reg_number'] ?? '';
+          final String email = firstResult['email'] ?? '';
+          final String university = firstResult['university'] ?? '';
+          final String bloodGroup = firstResult['blood_group'] ?? '';
+          final String action = firstResult['action'] ?? 'time_in';
+          final String time = firstResult['time'] ?? DateTime.now().toIso8601String();
+          final double confidence = firstResult['confidence'] is num ? (firstResult['confidence'] as num).toDouble() : 0.0;
+          final String profileImage = firstResult['image'] ?? '';
+          final String verificationMethod = firstResult['verification_method'] ?? 'both';
+          
+          return {
+            'success': true,
+            'profile_name': profileName,
+            'reg_number': regNumber,
+            'email': email,
+            'university': university,
+            'blood_group': bloodGroup,
+            'action': action,
+            'time': time,
+            'confidence': confidence,
+            'profile_image': profileImage,
+            'verification_method': verificationMethod,
+            'raw_response': responseData
+          };
+        } else {
+          // Return a generic success response
+          return {
+            'success': true,
+            'profile_name': 'Unknown',
+            'timestamp': DateTime.now().toString(),
+            'raw_response': responseData
+          };
+        }
+      } else {
+        throw Exception('Failed to mark attendance: $responseBody');
+      }
+    } catch (e) {
+      debugPrint('markAttendanceWithFaceAndVoice error: $e');
+      throw Exception('Error marking attendance with face and voice: $e');
+    }
+  }
+
+  // Add a single face image to a profile
+  static Future<Profile> addFaceImage(String profileId, File imageFile) async {
+    debugPrint('addFaceImage: Adding face image to profile: $profileId');
+    try {
+      // Validate image file
+      if (!await imageFile.exists()) {
+        throw Exception('Image file does not exist at path: ${imageFile.path}');
+      }
+      
+      // Create multipart request
+      var request = http.MultipartRequest(
+        'POST', 
+        Uri.parse('$_baseUrl/profiles/$profileId/add_face_images/')
+      );
+      
+      // Add auth headers
+      final headers = _getAuthHeaders(isMultipart: true);
+      request.headers.addAll(headers);
+      
+      // Add face image
+      debugPrint('addFaceImage: Adding image from file: ${imageFile.path}');
+      try {
+        final bytes = await imageFile.readAsBytes();
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            'face_images',
+            bytes,
+            filename: imageFile.path.split('/').last,
+            contentType: MediaType('image', 'jpeg'),
+          )
+        );
+      } catch (e) {
+        debugPrint('addFaceImage: Error reading image file: $e');
+        throw Exception('Error reading image file: $e');
+      }
+      
+      // Send request
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      debugPrint('addFaceImage: Response status: ${response.statusCode}');
+      debugPrint('addFaceImage: Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        // Get the updated profile after adding image
+        return await getProfileById(profileId);
+      } else if (response.statusCode == 400 && response.body.toLowerCase().contains('no face')) {
+        // Face detection error from backend
+        debugPrint('addFaceImage: Backend reported no face or face detection error');
+        throw Exception('The server could not detect faces in the provided image. Please try with a clearer image that shows a face clearly.');
+      } else {
+        throw Exception('Failed to add face image: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('addFaceImage error: $e');
+      throw Exception('Error adding face image: $e');
     }
   }
 }

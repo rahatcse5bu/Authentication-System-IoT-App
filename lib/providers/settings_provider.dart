@@ -18,7 +18,7 @@ class SettingsProvider with ChangeNotifier {
     
     try {
       // First load local settings
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await ApiService.ensureSharedPreferences();
       _isDarkMode = prefs.getBool('dark_mode') ?? false;
       _esp32Url = prefs.getString('esp32_url');
       
@@ -57,7 +57,7 @@ class SettingsProvider with ChangeNotifier {
   
   Future<void> toggleDarkMode() async {
     _isDarkMode = !_isDarkMode;
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await ApiService.ensureSharedPreferences();
     await prefs.setBool('dark_mode', _isDarkMode);
     
     // Also update server settings
@@ -76,7 +76,7 @@ class SettingsProvider with ChangeNotifier {
     _esp32Url = url;
     
     // Store locally
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await ApiService.ensureSharedPreferences();
     await prefs.setString('esp32_url', url);
     
     notifyListeners();

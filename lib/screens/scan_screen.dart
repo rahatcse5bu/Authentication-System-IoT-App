@@ -16,6 +16,7 @@ import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
 import '../services/face_detection_service.dart';
+import '../services/audio_recorder_service.dart';
 
 class ScanScreen extends StatefulWidget {
   @override
@@ -59,6 +60,15 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   bool _isFaceDetected = false;
   String _faceDetectionMessage = '';
   bool _isProcessing = false;
+  
+  // Voice recording
+  final AudioRecorderService _audioRecorderService = AudioRecorderService();
+  bool _isRecordingVoice = false;
+  String? _voiceFilePath;
+  bool _useVoiceForAttendance = false;
+  
+  // Verification method
+  String _verificationMethod = 'face'; // 'face', 'voice', or 'both'
 
   @override
   void initState() {
@@ -97,6 +107,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       _refreshTimer = null;
     }
     _fadeController.dispose();
+    _audioRecorderService.dispose();
     super.dispose();
   }
   
@@ -973,11 +984,415 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     }
   }
   
+  Future<void> _startRecording() async {
+    final hasPermission = await _audioRecorderService.checkPermissions();
+    
+    if (!hasPermission) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Microphone permission denied')),
+      );
+      return;
+    }
+    
+    final success = await _audioRecorderService.startRecording();
+    
+    if (success) {
+      setState(() {
+        _isRecordingVoice = true;
+        _faceDetectionMessage = 'Recording voice...';
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to start recording')),
+      );
+    }
+  }
+  
+  Future<void> _stopRecording() async {
+    final filePath = await _audioRecorderService.stopRecording();
+    
+    setState(() {
+      _isRecordingVoice = false;
+      _voiceFilePath = filePath;
+      _faceDetectionMessage = filePath != null 
+          ? 'Voice recorded, ready for attendance' 
+          : 'Failed to record voice';
+    });
+  }
+  
+  Future<void> _playRecording() async {
+    if (_voiceFilePath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No voice sample to play')),
+      );
+      return;
+    }
+    
+    final success = await _audioRecorderService.playRecording();
+    
+    if (!success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to play voice sample')),
+      );
+    }
+  }
+  
+  Future<void> _markAttendanceWithVoice() async {
+    if (_voiceFilePath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please record your voice first')),
+      );
+      return;
+    }
+    
+    setState(() {
+      _isProcessing = true;
+      _faceDetectionMessage = 'Processing voice for attendance...';
+    });
+    
+    try {
+      final result = await ApiService.markAttendanceWithVoice(File(_voiceFilePath!));
+      
+      // Extract profile information
+      final String profileName = result['profile_name'] ?? 'Unknown';
+      final String regNumber = result['reg_number'] ?? '';
+      final String displayName = regNumber.isNotEmpty ? '$profileName ($regNumber)' : profileName;
+      final String action = result['action'] ?? 'time_in';
+      final String actionDisplay = action == 'time_in' ? 'Time In' : (action == 'time_out' ? 'Time Out' : action);
+      final String timeStr = result['time'] ?? DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+      final String verificationMethod = result['verification_method'] ?? 'voice';
+      
+      setState(() {
+        _scanCount++;
+        _lastScanTime = DateTime.now();
+        _isFaceDetected = true;
+        _faceDetectionMessage = 'Attendance marked for $displayName using voice!';
+        _statusMessage = 'Attendance marked successfully';
+      });
+      
+      _showAttendanceSuccessDialog(
+        profileName: profileName,
+        regNumber: regNumber,
+        action: action,
+        actionDisplay: actionDisplay,
+        timeStr: timeStr,
+        verificationMethod: verificationMethod,
+      );
+    } catch (e) {
+      debugPrint('_markAttendanceWithVoice error: $e');
+      setState(() {
+        _isFaceDetected = false;
+        _faceDetectionMessage = 'Error: ${e.toString()}';
+        _statusMessage = 'Error marking attendance';
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error marking attendance: $e')),
+      );
+    } finally {
+      setState(() {
+        _isProcessing = false;
+      });
+    }
+  }
+  
+  Future<void> _markAttendanceWithBoth() async {
+    if (_voiceFilePath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please record your voice first')),
+      );
+      return;
+    }
+    
+    setState(() {
+      _isProcessing = true;
+      _faceDetectionMessage = 'Capturing image for combined verification...';
+    });
+    
+    try {
+      // Capture image
+      final imageBytes = await FaceDetectionService.captureEsp32Frame(_cachedEsp32Url!);
+      File? imageFile;
+      
+      if (imageBytes != null) {
+        // Save to a file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final imagePath = '${tempDir.path}/esp32_scan_$timestamp.jpg';
+        imageFile = File(imagePath);
+        await imageFile.writeAsBytes(imageBytes);
+        debugPrint('_markAttendanceWithBoth: Image captured: ${imageFile.path}');
+      } else {
+        // Fallback to ApiService if FaceDetectionService failed
+        imageFile = await ApiService.captureImage();
+        debugPrint('_markAttendanceWithBoth: Image captured using ApiService: ${imageFile.path}');
+      }
+      
+      setState(() {
+        _faceDetectionMessage = 'Processing face and voice...';
+      });
+      
+      // Mark attendance with both face and voice
+      final result = await ApiService.markAttendanceWithFaceAndVoice(
+        imageFile, 
+        File(_voiceFilePath!),
+        _cachedEsp32Url
+      );
+      
+      // Extract profile information
+      final String profileName = result['profile_name'] ?? 'Unknown';
+      final String regNumber = result['reg_number'] ?? '';
+      final String displayName = regNumber.isNotEmpty ? '$profileName ($regNumber)' : profileName;
+      final String action = result['action'] ?? 'time_in';
+      final String actionDisplay = action == 'time_in' ? 'Time In' : (action == 'time_out' ? 'Time Out' : action);
+      final double confidence = result['confidence'] is double ? result['confidence'] as double : 0.0;
+      final String timeStr = result['time'] ?? DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+      final String email = result['email'] ?? '';
+      final String university = result['university'] ?? '';
+      final String bloodGroup = result['blood_group'] ?? '';
+      final String profileImage = result['profile_image'] ?? '';
+      final String verificationMethod = result['verification_method'] ?? 'both';
+      
+      setState(() {
+        _scanCount++;
+        _lastScanTime = DateTime.now();
+        _isFaceDetected = true;
+        _faceDetectionMessage = 'Attendance marked for $displayName using face and voice!';
+        _statusMessage = 'Attendance marked successfully';
+      });
+      
+      _showAttendanceSuccessDialog(
+        profileName: profileName,
+        regNumber: regNumber,
+        email: email,
+        university: university,
+        bloodGroup: bloodGroup,
+        action: action,
+        actionDisplay: actionDisplay,
+        timeStr: timeStr,
+        confidence: confidence,
+        profileImage: profileImage,
+        verificationMethod: verificationMethod,
+      );
+    } catch (e) {
+      debugPrint('_markAttendanceWithBoth error: $e');
+      setState(() {
+        _isFaceDetected = false;
+        _faceDetectionMessage = 'Error: ${e.toString()}';
+        _statusMessage = 'Error marking attendance';
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error marking attendance: $e')),
+      );
+    } finally {
+      setState(() {
+        _isProcessing = false;
+      });
+    }
+  }
+  
+  void _showAttendanceSuccessDialog({
+    required String profileName,
+    required String regNumber,
+    String email = '',
+    String university = '',
+    String bloodGroup = '',
+    required String action,
+    required String actionDisplay,
+    required String timeStr,
+    double confidence = 0.0,
+    String profileImage = '',
+    required String verificationMethod,
+  }) {
+    if (!mounted) return;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) => AlertDialog(
+        contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+        title: Row(
+          children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 24),
+            const SizedBox(width: 8),
+            const Text('Success', style: TextStyle(color: Colors.green)),
+          ],
+        ),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Profile image if available
+              if (profileImage.isNotEmpty)
+                Container(
+                  width: 100,
+                  height: 100,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    image: DecorationImage(
+                      image: NetworkImage(profileImage),
+                      fit: BoxFit.cover,
+                    ),
+                    border: Border.all(color: Colors.grey.shade300, width: 3),
+                  ),
+                )
+              else
+                Container(
+                  width: 100,
+                  height: 100,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.grey.shade200,
+                    border: Border.all(color: Colors.grey.shade300, width: 3),
+                  ),
+                  child: const Icon(Icons.person, size: 60, color: Colors.grey),
+                ),
+              
+              // Profile name
+              Text(
+                profileName,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+                textAlign: TextAlign.center,
+              ),
+              
+              // Verification method badge
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.purple.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.purple.shade200),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      verificationMethod == 'voice' 
+                          ? Icons.mic 
+                          : (verificationMethod == 'both' ? Icons.verified_user : Icons.face),
+                      color: Colors.purple,
+                      size: 16,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Verified by ${verificationMethod == 'both' ? 'face and voice' : verificationMethod}',
+                      style: TextStyle(
+                        color: Colors.purple,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              // Action type with nice badge
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: action == 'time_in' ? Colors.blue.shade50 : Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: action == 'time_in' ? Colors.blue.shade200 : Colors.orange.shade200,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      action == 'time_in' ? Icons.login : Icons.logout,
+                      color: action == 'time_in' ? Colors.blue : Colors.orange,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      actionDisplay,
+                      style: TextStyle(
+                        color: action == 'time_in' ? Colors.blue : Colors.orange,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              // Profile details table
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.shade200),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    // Registration number
+                    if (regNumber.isNotEmpty)
+                      _buildDetailRow('ID', regNumber),
+                      
+                    // Email
+                    if (email.isNotEmpty)
+                      _buildDetailRow('Email', email),
+                      
+                    // University
+                    if (university.isNotEmpty)
+                      _buildDetailRow('University', university),
+                      
+                    // Blood group
+                    if (bloodGroup.isNotEmpty)
+                      _buildDetailRow('Blood Group', bloodGroup),
+                      
+                    // Time
+                    _buildDetailRow('Time', timeStr),
+                    
+                    // Confidence score with color indicator (only for face/both verification)
+                    if (confidence > 0 && verificationMethod != 'voice')
+                      _buildDetailRow(
+                        'Face Match',
+                        '${confidence.toStringAsFixed(1)}%',
+                        valueColor: confidence > 90 ? Colors.green : (confidence > 75 ? Colors.orange : Colors.red),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    ).then((_) {
+      // Ensure we're ready for the next scan
+      if (mounted) {
+        setState(() {
+          _isFaceDetected = false;
+          _faceDetectionMessage = 'Ready to scan';
+        });
+      }
+    });
+    
+    // Auto-dismiss dialog after 3 seconds
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Face Scan'),
+        title: const Text('Face & Voice Scan'),
         actions: [
           IconButton(
             icon: Icon(_previewEnabled ? Icons.videocam : Icons.videocam_off),
@@ -992,6 +1407,8 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                 _recognizedProfiles = [];
                 _scanCount = 0;
                 _lastScanTime = null;
+                _voiceFilePath = null;
+                _verificationMethod = 'face';
               });
               // Restart camera preview
               _restartCameraPreview();
@@ -1104,38 +1521,201 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                     ),
                   ),
                   
-                  // Preview container
-                  Expanded(
-                    child: Stack(
+                  // Verification method selector
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    color: Colors.grey[100],
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Container(
-                          width: double.infinity,
-                          margin: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            border: Border.all(color: Colors.grey),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: FadeTransition(
-                            opacity: _fadeController,
-                            child: _isLoadingPreview
-                                ? const Center(child: CircularProgressIndicator())
-                                : _buildCameraPreview(),
+                        Text(
+                          'Verification Method',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            color: Colors.grey[800],
                           ),
                         ),
-                        if (_previewEnabled)
-                          Positioned(
-                            right: 24,
-                            bottom: 24,
-                            child: FloatingActionButton(
-                              mini: true,
-                              onPressed: _isLoadingPreview ? null : _restartCameraPreview,
-                              tooltip: 'Restart preview',
-                              child: const Icon(Icons.refresh),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ChoiceChip(
+                                label: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.face, size: 16),
+                                    const SizedBox(width: 4),
+                                    const Text('Face Only'),
+                                  ],
+                                ),
+                                selected: _verificationMethod == 'face',
+                                onSelected: (selected) {
+                                  if (selected) {
+                                    setState(() {
+                                      _verificationMethod = 'face';
+                                    });
+                                  }
+                                },
+                              ),
                             ),
-                          ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ChoiceChip(
+                                label: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.mic, size: 16),
+                                    const SizedBox(width: 4),
+                                    const Text('Voice Only'),
+                                  ],
+                                ),
+                                selected: _verificationMethod == 'voice',
+                                onSelected: (selected) {
+                                  if (selected) {
+                                    setState(() {
+                                      _verificationMethod = 'voice';
+                                    });
+                                  }
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ChoiceChip(
+                                label: Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(Icons.verified_user, size: 16),
+                                    const SizedBox(width: 4),
+                                    const Text('Both'),
+                                  ],
+                                ),
+                                selected: _verificationMethod == 'both',
+                                onSelected: (selected) {
+                                  if (selected) {
+                                    setState(() {
+                                      _verificationMethod = 'both';
+                                    });
+                                  }
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
                       ],
                     ),
                   ),
+                  
+                  // Preview container - show only for face and both modes
+                  if (_verificationMethod != 'voice')
+                    Expanded(
+                      child: Stack(
+                        children: [
+                          Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              border: Border.all(color: Colors.grey),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: FadeTransition(
+                              opacity: _fadeController,
+                              child: _isLoadingPreview
+                                  ? const Center(child: CircularProgressIndicator())
+                                  : _buildCameraPreview(),
+                            ),
+                          ),
+                          if (_previewEnabled)
+                            Positioned(
+                              right: 24,
+                              bottom: 24,
+                              child: FloatingActionButton(
+                                mini: true,
+                                onPressed: _isLoadingPreview ? null : _restartCameraPreview,
+                                tooltip: 'Restart preview',
+                                child: const Icon(Icons.refresh),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  
+                  // Voice recording controls - show for voice and both modes
+                  if (_verificationMethod == 'voice' || _verificationMethod == 'both')
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.grey[100],
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.grey[300]!),
+                            ),
+                            child: Column(
+                              children: [
+                                Row(
+                                  children: [
+                                    Icon(
+                                      _voiceFilePath != null ? Icons.mic : Icons.mic_off,
+                                      color: _voiceFilePath != null ? Colors.green : Colors.grey,
+                                      size: 24,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        _voiceFilePath != null
+                                            ? 'Voice sample recorded'
+                                            : 'No voice sample',
+                                        style: TextStyle(
+                                          color: _voiceFilePath != null ? Colors.green : Colors.grey[700],
+                                          fontWeight: _voiceFilePath != null ? FontWeight.bold : FontWeight.normal,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 16),
+                                Text(
+                                  'Please record a short phrase for voice verification',
+                                  style: TextStyle(
+                                    color: Colors.grey[700],
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                const SizedBox(height: 16),
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                  children: [
+                                    ElevatedButton.icon(
+                                      onPressed: _isRecordingVoice ? _stopRecording : _startRecording,
+                                      icon: Icon(_isRecordingVoice ? Icons.stop : Icons.mic),
+                                      label: Text(_isRecordingVoice ? 'Stop Recording' : 'Start Recording'),
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: _isRecordingVoice ? Colors.red : null,
+                                      ),
+                                    ),
+                                    ElevatedButton.icon(
+                                      onPressed: _voiceFilePath != null ? _playRecording : null,
+                                      icon: const Icon(Icons.play_arrow),
+                                      label: const Text('Play Recording'),
+                                    ),
+                                  ],
+                                ),
+                                if (_isRecordingVoice) ...[
+                                  const SizedBox(height: 16),
+                                  const LinearProgressIndicator(),
+                                  const SizedBox(height: 8),
+                                  const Text('Recording in progress...', style: TextStyle(color: Colors.red)),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   
                   // Control buttons
                   Padding(
@@ -1143,28 +1723,58 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _isScanning ? null : _singleCapture,
-                            icon: const Icon(Icons.camera),
-                            label: const Text('Single Capture'),
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                        if (_verificationMethod == 'face')
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _isScanning ? null : _singleCapture,
+                              icon: const Icon(Icons.camera),
+                              label: const Text('Single Capture'),
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _isScanning ? _stopScanning : _startScanning,
-                            icon: Icon(_isScanning ? Icons.stop : Icons.play_arrow),
-                            label: Text(_isScanning ? 'Stop Scanning' : 'Start Scanning'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: _isScanning ? Colors.red : Colors.green,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
+                        
+                        if (_verificationMethod == 'voice')
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: (_isProcessing || _isRecordingVoice) ? null : _markAttendanceWithVoice,
+                              icon: const Icon(Icons.mic),
+                              label: const Text('Mark with Voice'),
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                backgroundColor: Colors.blue,
+                              ),
                             ),
                           ),
-                        ),
+                          
+                        if (_verificationMethod == 'both')
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: (_isProcessing || _isRecordingVoice) ? null : _markAttendanceWithBoth,
+                              icon: const Icon(Icons.verified_user),
+                              label: const Text('Mark with Both'),
+                              style: ElevatedButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                backgroundColor: Colors.purple,
+                              ),
+                            ),
+                          ),
+                          
+                        if (_verificationMethod == 'face') ...[
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: _isScanning ? _stopScanning : _startScanning,
+                              icon: Icon(_isScanning ? Icons.stop : Icons.play_arrow),
+                              label: Text(_isScanning ? 'Stop Scanning' : 'Start Scanning'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _isScanning ? Colors.red : Colors.green,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),

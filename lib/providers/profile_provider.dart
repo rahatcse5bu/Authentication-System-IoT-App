@@ -22,7 +22,7 @@ class ProfileProvider with ChangeNotifier {
   Future<void> _checkAuthAndLoadProfiles() async {
     debugPrint('ProfileProvider._checkAuthAndLoadProfiles: Checking authentication state');
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await ApiService.ensureSharedPreferences();
       final token = prefs.getString('auth_token');
       
       if (token == null) {
@@ -103,12 +103,23 @@ class ProfileProvider with ChangeNotifier {
     
     try {
       debugPrint('ProfileProvider.updateProfile: Calling ApiService.updateProfile');
-      final updatedProfile = await ApiService.updateProfile(profile);
+      final updatedProfile = await ApiService.updateProfile(
+        profile.id,
+        name: profile.name,
+        email: profile.email,
+        bloodGroup: profile.bloodGroup,
+        regNumber: profile.regNumber,
+        university: profile.university,
+        isActive: profile.isActive,
+        imageFile: imageFiles?.isNotEmpty == true ? imageFiles!.first : null,
+      );
       
-      // If new face images are provided, add them
-      if (imageFiles != null && imageFiles.isNotEmpty) {
-        debugPrint('ProfileProvider.updateProfile: Adding new face images');
-        await ApiService.addFaceImages(profile.id, imageFiles);
+      // If additional face images are provided (beyond the first one), add them
+      if (imageFiles != null && imageFiles.length > 1) {
+        debugPrint('ProfileProvider.updateProfile: Adding additional face images');
+        for (int i = 1; i < imageFiles.length; i++) {
+          await ApiService.addFaceImage(profile.id, imageFiles[i]);
+        }
       }
       
       debugPrint('ProfileProvider.updateProfile: Profile updated successfully, updating list');
@@ -183,5 +194,10 @@ class ProfileProvider with ChangeNotifier {
       notifyListeners();
       return false;
     }
+  }
+  
+  Future<void> refreshProfiles() async {
+    debugPrint('ProfileProvider.refreshProfiles: Refreshing profile list');
+    return fetchProfiles();
   }
 }

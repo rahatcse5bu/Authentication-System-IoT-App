@@ -14,7 +14,7 @@ class AuthProvider with ChangeNotifier {
   }
   
   Future<void> _checkLoginStatus() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await ApiService.ensureSharedPreferences();
     final token = prefs.getString('auth_token');
     
     if (token != null) {
@@ -35,7 +35,7 @@ class AuthProvider with ChangeNotifier {
         _username = username;
         
         // Save username
-        final prefs = await SharedPreferences.getInstance();
+        final prefs = await ApiService.ensureSharedPreferences();
         await prefs.setString('username', username);
         
         debugPrint('AuthProvider.login: Login successful');

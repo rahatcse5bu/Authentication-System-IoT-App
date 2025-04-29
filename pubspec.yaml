@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
   cupertino_icons: ^1.0.2
   provider: ^6.1.1
-  http: ^1.1.0
+  http: ^1.0.0
   shared_preferences: ^2.2.2
   image_picker: ^1.0.7
   path_provider: ^2.1.2
@@ -19,6 +19,11 @@ dependencies:
   camera: ^0.10.5+9
   image: ^4.1.7
   intl: ^0.20.2
+  # Audio recording packages
+  record: ^4.4.4
+  audioplayers: ^5.2.1
+  permission_handler: ^11.0.1
+  http_parser: ^4.0.2
 
 dev_dependencies:
   flutter_test:

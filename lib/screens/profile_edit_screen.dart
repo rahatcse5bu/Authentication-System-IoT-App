@@ -12,6 +12,7 @@ import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
 import '../services/face_detection_service.dart';
+import '../services/audio_recorder_service.dart';
 
 class ProfileEditScreen extends StatefulWidget {
   final Profile? profile;
@@ -33,6 +34,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   List<File> _imageFiles = [];
   bool _isProcessing = false;
   static const int maxImages = 15;
+  
+  // Voice recording
+  final AudioRecorderService _audioRecorderService = AudioRecorderService();
+  bool _hasVoiceSample = false;
+  String? _voiceFilePath;
+  bool _isRecordingVoice = false;
   
   // ESP32 Camera preview variables
   bool _showCameraPreview = false;
@@ -70,6 +77,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       _bloodGroupController.text = widget.profile!.bloodGroup;
       _regNumberController.text = widget.profile!.regNumber;
       _universityController.text = widget.profile!.university;
+      _hasVoiceSample = widget.profile!.hasVoiceSample;
     }
   }
   
@@ -103,6 +111,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     }
     
     _fadeController.dispose();
+    _audioRecorderService.dispose();
     super.dispose();
   }
   
@@ -654,188 +663,177 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     }
   }
   
-  Future<void> _captureFromESP32() async {
-    // If camera preview is active and we have a preview image, use it directly
-    if (_showCameraPreview && _previewImageBytes != null) {
-      try {
+  Widget _buildCameraPreview() {
+    if (_previewImageBytes == null) {
+      return const Center(
+        child: Text('No preview available'),
+      );
+    }
+    
+    return Image.memory(
+      _previewImageBytes!,
+      fit: BoxFit.contain,
+      gaplessPlayback: true,
+      errorBuilder: (context, error, stackTrace) {
+        debugPrint('Error rendering preview image: $error');
+        return const Center(
+          child: Text('Error loading preview'),
+        );
+      },
+    );
+  }
+  
+  Future<void> _refreshPreview() async {
+    if (_isDisposing) return;
+    
+    setState(() {
+      _isLoadingPreview = true;
+    });
+    
+    try {
+      if (_cachedEsp32Url == null || _cachedEsp32Url!.isEmpty) {
+        throw Exception('ESP32 URL not configured');
+      }
+      
+      final bytes = await ApiService.getEsp32CameraPreview();
+      
+      if (mounted) {
         setState(() {
-          _isProcessing = true;
+          _previewImageBytes = bytes;
+          _isLoadingPreview = false;
           _isFaceDetected = false;
-          _faceDetectionMessage = 'Processing image...';
         });
-        
-        // Use application documents directory instead of temporary directory
-        final appDir = await getApplicationDocumentsDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
-        
-        final imageFile = File(imagePath);
-        await imageFile.writeAsBytes(_previewImageBytes!);
-        
-        debugPrint('ESP32 image captured to: ${imageFile.path}');
-        
-        // Verify file exists and has content
-        if (await imageFile.exists()) {
-          final size = await imageFile.length();
-          debugPrint('ESP32 image size: $size bytes');
-          
-          if (size > 0) {
-            // Add image directly without face detection
-            setState(() {
-              _imageFiles.add(imageFile);
-              _isProcessing = false;
-              _isFaceDetected = true;
-              _faceDetectionMessage = 'Image captured';
-              _showCameraPreview = false; // Close preview after capture
-            });
-            _stopCameraPreview();
-          } else {
-            setState(() {
-              _isProcessing = false;
-              _isFaceDetected = false;
-              _faceDetectionMessage = 'Image is empty';
-            });
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Captured image is empty')),
-            );
-          }
-        } else {
-          setState(() {
-            _isProcessing = false;
-            _isFaceDetected = false;
-            _faceDetectionMessage = 'Could not access image';
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not access the captured image')),
-          );
-        }
-      } catch (e) {
+      }
+    } catch (e) {
+      debugPrint('Error refreshing preview: $e');
+      if (mounted) {
         setState(() {
-          _isProcessing = false;
-          _isFaceDetected = false;
-          _faceDetectionMessage = 'Error saving image';
+          _isLoadingPreview = false;
         });
-        
-        debugPrint('Error saving ESP32 preview image: $e');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error saving preview image: $e')),
+          SnackBar(content: Text('Error refreshing preview: $e')),
+        );
+      }
+    }
+  }
+  
+  Future<void> _captureFromESP32() async {
+    if (_isDisposing || _isProcessing) return;
+    
+    setState(() {
+      _isProcessing = true;
+      _isFaceDetected = false;
+      _faceDetectionMessage = 'Capturing image...';
+    });
+    
+    try {
+      // Capture image from ESP32 camera
+      final file = await ApiService.captureImage();
+      
+      // Check if the image contains a face
+      final hasFace = await ApiService.checkFace(file);
+      
+      if (hasFace) {
+        setState(() {
+          _imageFiles.add(file);
+          _isFaceDetected = true;
+          _faceDetectionMessage = 'Face detected!';
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Image captured successfully')),
+        );
+      } else {
+        setState(() {
+          _isFaceDetected = false;
+          _faceDetectionMessage = 'No face detected';
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No face detected in the image')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error capturing from ESP32: $e');
+      setState(() {
+        _isFaceDetected = false;
+        _faceDetectionMessage = 'Error: $e';
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error capturing image: $e')),
+      );
+    } finally {
+      setState(() {
+        _isProcessing = false;
+      });
+    }
+  }
+  
+  Future<void> _startRecording() async {
+    final hasPermission = await _audioRecorderService.checkPermissions();
+    
+    if (!hasPermission) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Microphone permission denied')),
+      );
+      return;
+    }
+    
+    final success = await _audioRecorderService.startRecording();
+    
+    if (success) {
+      setState(() {
+        _isRecordingVoice = true;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Recording voice sample...')),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Failed to start recording')),
+      );
+    }
+  }
+  
+  Future<void> _stopRecording() async {
+    final filePath = await _audioRecorderService.stopRecording();
+    
+    setState(() {
+      _isRecordingVoice = false;
+      _voiceFilePath = filePath;
+      _hasVoiceSample = filePath != null;
+    });
+    
+    if (filePath != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Voice sample recorded successfully')),
+      );
+    }
+  }
+  
+  Future<void> _playRecording() async {
+    if (_voiceFilePath == null && !widget.profile!.hasVoiceSample) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No voice sample to play')),
+      );
+      return;
+    }
+    
+    if (_voiceFilePath != null) {
+      final success = await _audioRecorderService.playRecording();
+      
+      if (!success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to play voice sample')),
         );
       }
     } else {
-      // If preview isn't active, capture directly from API
-      try {
-        setState(() {
-          _isProcessing = true;
-          _isFaceDetected = false;
-          _faceDetectionMessage = 'Capturing image...';
-        });
-        
-        // Use cached ESP32 URL to prevent context access during disposal
-        final String? esp32Url = _cachedEsp32Url ?? _settingsProvider?.esp32Url;
-        if (esp32Url == null || esp32Url.isEmpty) {
-          setState(() {
-            _isProcessing = false;
-            _faceDetectionMessage = 'ESP32 URL not configured';
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('ESP32 camera URL not configured')),
-          );
-          return;
-        }
-
-        // Try using FaceDetectionService first for more reliable capture
-        final imageBytes = await FaceDetectionService.captureEsp32Frame(esp32Url);
-        if (imageBytes != null) {
-          // Save to a file
-          final appDir = await getApplicationDocumentsDirectory();
-          final timestamp = DateTime.now().millisecondsSinceEpoch;
-          final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
-          final imageFile = File(imagePath);
-          await imageFile.writeAsBytes(imageBytes);
-          
-          debugPrint('ESP32 image captured using FaceDetectionService: ${imageFile.path}');
-          final size = await imageFile.length();
-          
-          // Add image without checking for face
-          if (size > 0) {
-            setState(() {
-              _imageFiles.add(imageFile);
-              _isProcessing = false;
-              _isFaceDetected = true;
-              _faceDetectionMessage = 'Image captured';
-            });
-          } else {
-            setState(() {
-              _isProcessing = false;
-              _faceDetectionMessage = 'Image is empty';
-            });
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Captured image is empty')),
-            );
-          }
-          return;
-        }
-        
-        // Fallback to ApiService if FaceDetectionService failed
-        final tempFile = await ApiService.captureImage();
-        debugPrint('ESP32 image captured to temp location: ${tempFile.path}');
-        
-        // Verify file exists and has content
-        if (await tempFile.exists()) {
-          final size = await tempFile.length();
-          debugPrint('ESP32 image size: $size bytes');
-          
-          if (size > 0) {
-            // Copy to a more permanent location
-            final appDir = await getApplicationDocumentsDirectory();
-            final timestamp = DateTime.now().millisecondsSinceEpoch;
-            final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
-            
-            // Copy file to permanent location
-            final bytes = await tempFile.readAsBytes();
-            final permanentFile = File(imagePath);
-            await permanentFile.writeAsBytes(bytes);
-            
-            debugPrint('Image copied to permanent location: ${permanentFile.path}');
-            
-            setState(() {
-              _imageFiles.add(permanentFile);
-              _isProcessing = false;
-              _isFaceDetected = true;
-              _faceDetectionMessage = 'Image captured';
-            });
-          } else {
-            setState(() {
-              _isProcessing = false;
-              _isFaceDetected = false;
-              _faceDetectionMessage = 'Image is empty';
-            });
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Captured image is empty')),
-            );
-          }
-        } else {
-          setState(() {
-            _isProcessing = false;
-            _isFaceDetected = false;
-            _faceDetectionMessage = 'Could not access image';
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not access the captured image')),
-          );
-        }
-      } catch (e) {
-        setState(() {
-          _isProcessing = false;
-          _isFaceDetected = false;
-          _faceDetectionMessage = 'Error capturing image';
-        });
-        
-        debugPrint('Error capturing ESP32 image: $e');
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error capturing image: $e')),
-        );
-      }
+      // Show a message that we can't play the existing voice sample
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Cannot play server-stored voice sample. You can record a new one.')),
+      );
     }
   }
   
@@ -843,56 +841,87 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     if (!_formKey.currentState!.validate()) {
       return;
     }
-
-    if (_imageFiles.isEmpty && widget.profile == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please add at least one face image')),
-      );
-      return;
-    }
-
+    
     setState(() {
       _isProcessing = true;
     });
-
+    
     try {
-      final profile = Profile(
-        id: widget.profile?.id ?? '', // Empty string for new profiles
-        name: _nameController.text,
-        email: _emailController.text,
-        bloodGroup: _bloodGroupController.text,
-        regNumber: _regNumberController.text,
-        university: _universityController.text,
-        imageUrl: widget.profile?.imageUrl ?? '', // Empty string for new profiles
-        registrationDate: widget.profile?.registrationDate ?? DateTime.now(), // Current date for new profiles
-        isActive: widget.profile?.isActive ?? true,
-      );
-
+      final String name = _nameController.text.trim();
+      final String email = _emailController.text.trim();
+      final String bloodGroup = _bloodGroupController.text.trim();
+      final String regNumber = _regNumberController.text.trim();
+      final String university = _universityController.text.trim();
+      
       if (widget.profile == null) {
-        // Creating new profile
-        await ApiService.createProfile(profile, _imageFiles);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Profile created successfully')),
-        );
-      } else {
-        // Updating existing profile
-        if (_imageFiles.isNotEmpty) {
-          await ApiService.addFaceImages(profile.id!, _imageFiles);
+        // Create new profile
+        if (_imageFiles.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Please add at least one face image')),
+          );
+          setState(() {
+            _isProcessing = false;
+          });
+          return;
         }
-        await ApiService.updateProfile(profile);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Profile updated successfully')),
+        
+        final profile = await ApiService.registerProfileWithFaceAndVoice(
+          name,
+          email,
+          regNumber,
+          university,
+          bloodGroup,
+          _imageFiles.first,
+          _voiceFilePath != null ? File(_voiceFilePath!) : null,
         );
-      }
-
-      if (mounted) {
-        Navigator.pop(context);
+        
+        await Provider.of<ProfileProvider>(context, listen: false).refreshProfiles();
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Profile created successfully')),
+          );
+          Navigator.pop(context);
+        }
+      } else {
+        // Update existing profile
+        final updatedProfile = await ApiService.updateProfile(
+          widget.profile!.id,
+          name: name,
+          email: email,
+          bloodGroup: bloodGroup,
+          regNumber: regNumber,
+          university: university,
+        );
+        
+        // Add face images if any were selected
+        if (_imageFiles.isNotEmpty) {
+          for (final imageFile in _imageFiles) {
+            await ApiService.addFaceImage(widget.profile!.id, imageFile);
+          }
+        }
+        
+        // Update voice sample if recorded
+        if (_voiceFilePath != null) {
+          await ApiService.updateProfileVoice(widget.profile!.id, File(_voiceFilePath!));
+        }
+        
+        await Provider.of<ProfileProvider>(context, listen: false).refreshProfiles();
+        
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Profile updated successfully')),
+          );
+          Navigator.pop(context);
+        }
       }
     } catch (e) {
       debugPrint('Error saving profile: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error saving profile: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error saving profile: $e')),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -956,6 +985,54 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     );
   }
   
+  void _removeImageFile(int index) {
+    if (index >= 0 && index < _imageFiles.length) {
+      setState(() {
+        _imageFiles.removeAt(index);
+      });
+    }
+  }
+  
+  Future<void> _deleteFaceImage(String id) async {
+    try {
+      setState(() {
+        _isProcessing = true;
+      });
+      
+      // Call API to delete the face image
+      // This would typically be an API call like:
+      // await ApiService.deleteFaceImage(widget.profile!.id, id);
+      
+      // For now, just update the profile locally by removing the face image
+      setState(() {
+        final updatedFaceImages = widget.profile!.faceImages
+            .where((image) => image.id != id)
+            .toList();
+        
+        // Update the profile with the updated face images
+        final updatedProfile = widget.profile!.copyWith(
+          faceImages: updatedFaceImages,
+        );
+        
+        // This is a simplification - in production, you would update the provider
+        Provider.of<ProfileProvider>(context, listen: false)
+            .updateProfile(updatedProfile);
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Face image deleted')),
+      );
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error deleting face image: $e')),
+      );
+    } finally {
+      setState(() {
+        _isProcessing = false;
+      });
+    }
+  }
+  
   @override
   Widget build(BuildContext context) {
     // Update cached settings provider when building
@@ -967,6 +1044,13 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.profile == null ? 'Create Profile' : 'Edit Profile'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.save),
+            onPressed: _isProcessing ? null : _saveProfile,
+            tooltip: 'Save Profile',
+          ),
+        ],
       ),
       body: _isProcessing
           ? const Center(child: CircularProgressIndicator())
@@ -975,11 +1059,14 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
               child: Form(
                 key: _formKey,
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     TextFormField(
                       controller: _nameController,
-                      decoration: const InputDecoration(labelText: 'Name'),
+                      decoration: const InputDecoration(
+                        labelText: 'Name',
+                        border: OutlineInputBorder(),
+                      ),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
                           return 'Please enter a name';
@@ -990,7 +1077,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: _emailController,
-                      decoration: const InputDecoration(labelText: 'Email'),
+                      decoration: const InputDecoration(
+                        labelText: 'Email',
+                        border: OutlineInputBorder(),
+                      ),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
                           return 'Please enter an email';
@@ -1001,7 +1091,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: _regNumberController,
-                      decoration: const InputDecoration(labelText: 'Registration Number'),
+                      decoration: const InputDecoration(
+                        labelText: 'Registration Number',
+                        border: OutlineInputBorder(),
+                      ),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
                           return 'Please enter a registration number';
@@ -1012,7 +1105,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: _universityController,
-                      decoration: const InputDecoration(labelText: 'University'),
+                      decoration: const InputDecoration(
+                        labelText: 'University',
+                        border: OutlineInputBorder(),
+                      ),
                       validator: (value) {
                         if (value == null || value.isEmpty) {
                           return 'Please enter a university';
@@ -1023,132 +1119,291 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                     const SizedBox(height: 16),
                     TextFormField(
                       controller: _bloodGroupController,
-                      decoration: const InputDecoration(labelText: 'Blood Group'),
-                      validator: (value) {
-                        if (value == null || value.isEmpty) {
-                          return 'Please enter a blood group';
-                        }
-                        return null;
-                      },
+                      decoration: const InputDecoration(
+                        labelText: 'Blood Group',
+                        border: OutlineInputBorder(),
+                      ),
                     ),
                     const SizedBox(height: 24),
+                    
+                    // Face Images Section
                     Text(
-                      'Face Images (${_imageFiles.length}/$maxImages)',
-                      style: Theme.of(context).textTheme.titleMedium,
+                      'Face Images',
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 8),
-                    _buildImagePreview(),
+                    Text(
+                      'Add clear images of the face for accurate recognition.',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.grey[700],
+                      ),
+                    ),
                     const SizedBox(height: 16),
-                    if (_showCameraPreview)
+                    Row(
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () => _pickImage(ImageSource.camera),
+                          icon: const Icon(Icons.camera_alt),
+                          label: const Text('Take Photo'),
+                        ),
+                        const SizedBox(width: 16),
+                        ElevatedButton.icon(
+                          onPressed: () => _pickImage(ImageSource.gallery),
+                          icon: const Icon(Icons.photo_library),
+                          label: const Text('Gallery'),
+                        ),
+                        const SizedBox(width: 16),
+                        if (Provider.of<SettingsProvider>(context).esp32Url?.isNotEmpty ?? false)
+                          ElevatedButton.icon(
+                            onPressed: _toggleESP32Camera,
+                            icon: Icon(_showCameraPreview ? Icons.videocam_off : Icons.videocam),
+                            label: Text(_showCameraPreview ? 'Hide Camera' : 'ESP32 Camera'),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    
+                    // ESP32 Camera Preview
+                    if (_showCameraPreview) ...[
                       Container(
-                        height: 200,
+                        height: 300,
+                        width: double.infinity,
+                        margin: const EdgeInsets.all(16),
                         decoration: BoxDecoration(
                           border: Border.all(color: Colors.grey),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: Stack(
-                          children: [
-                            _previewImageBytes != null
-                                ? Image.memory(
-                                    _previewImageBytes!,
-                                    fit: BoxFit.cover,
-                                  )
-                                : const Center(child: CircularProgressIndicator()),
-                            if (_isProcessing)
-                              Container(
-                                color: Colors.black54,
-                                child: Center(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const CircularProgressIndicator(),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        _faceDetectionMessage,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 16,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
+                        child: FadeTransition(
+                          opacity: _fadeController,
+                          child: _isLoadingPreview
+                              ? const Center(child: CircularProgressIndicator())
+                              : _buildCameraPreview(),
+                        ),
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          ElevatedButton.icon(
+                            onPressed: _captureFromESP32,
+                            icon: const Icon(Icons.camera),
+                            label: const Text('Capture'),
+                          ),
+                          const SizedBox(width: 16),
+                          ElevatedButton.icon(
+                            onPressed: _refreshPreview,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Refresh'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    
+                    // Display selected face images
+                    Text(
+                      'Selected Face Images (${_imageFiles.length})',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    
+                    if (widget.profile != null && widget.profile!.faceImages.isNotEmpty) ...[
+                      Text(
+                        'Existing Face Images (${widget.profile!.faceImages.length})',
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        height: 100,
+                        child: ListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: widget.profile!.faceImages.length,
+                          itemBuilder: (context, index) {
+                            final faceImage = widget.profile!.faceImages[index];
+                            return Container(
+                              margin: const EdgeInsets.only(right: 8),
+                              width: 100,
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.grey),
+                                borderRadius: BorderRadius.circular(8),
                               ),
-                            if (_isFaceDetected)
-                              Positioned(
-                                top: 8,
-                                right: 8,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.green,
-                                    borderRadius: BorderRadius.circular(4),
+                              child: Stack(
+                                children: [
+                                  Image.network(
+                                    faceImage.image,
+                                    fit: BoxFit.cover,
+                                    width: 100,
+                                    height: 100,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      return const Center(
+                                        child: Icon(Icons.broken_image, size: 40),
+                                      );
+                                    },
                                   ),
-                                  child: const Text(
-                                    'Face Detected',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
+                                  Positioned(
+                                    top: 0,
+                                    right: 0,
+                                    child: IconButton(
+                                      icon: const Icon(Icons.delete, color: Colors.red),
+                                      onPressed: () => _deleteFaceImage(faceImage.id),
                                     ),
                                   ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    
+                    if (_imageFiles.isNotEmpty) ...[
+                      SizedBox(
+                        height: 100,
+                        child: ListView.builder(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: _imageFiles.length,
+                          itemBuilder: (context, index) {
+                            return Container(
+                              margin: const EdgeInsets.only(right: 8),
+                              width: 100,
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.grey),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Stack(
+                                children: [
+                                  Image.file(
+                                    _imageFiles[index],
+                                    fit: BoxFit.cover,
+                                    width: 100,
+                                    height: 100,
+                                  ),
+                                  Positioned(
+                                    top: 0,
+                                    right: 0,
+                                    child: IconButton(
+                                      icon: const Icon(Icons.delete, color: Colors.red),
+                                      onPressed: () => _removeImageFile(index),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ] else if (widget.profile == null) ...[
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Text(
+                          'Please add at least one face image for registration',
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ],
+
+                    const SizedBox(height: 24),
+                    
+                    // Voice Sample Section
+                    Text(
+                      'Voice Sample (Optional)',
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Add a voice sample for additional verification.',
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.grey[700],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    
+                    // Voice recording UI
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.grey[100],
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.grey[300]!),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                _hasVoiceSample ? Icons.mic : Icons.mic_off,
+                                color: _hasVoiceSample ? Colors.green : Colors.grey,
+                                size: 24,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _hasVoiceSample
+                                      ? _voiceFilePath != null
+                                          ? 'Voice sample recorded'
+                                          : 'Voice sample exists on server'
+                                      : 'No voice sample',
+                                  style: TextStyle(
+                                    color: _hasVoiceSample ? Colors.green : Colors.grey[700],
+                                    fontWeight: _hasVoiceSample ? FontWeight.bold : FontWeight.normal,
+                                  ),
                                 ),
                               ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Please record a short phrase like "Hello, my name is [Your Name]"',
+                            style: TextStyle(
+                              color: Colors.grey[700],
+                              fontSize: 12,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              ElevatedButton.icon(
+                                onPressed: _isRecordingVoice ? _stopRecording : _startRecording,
+                                icon: Icon(_isRecordingVoice ? Icons.stop : Icons.mic),
+                                label: Text(_isRecordingVoice ? 'Stop Recording' : 'Start Recording'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: _isRecordingVoice ? Colors.red : null,
+                                ),
+                              ),
+                              ElevatedButton.icon(
+                                onPressed: (_voiceFilePath != null || widget.profile?.hasVoiceSample == true) ? _playRecording : null,
+                                icon: const Icon(Icons.play_arrow),
+                                label: const Text('Play Recording'),
+                              ),
+                            ],
+                          ),
+                          if (_isRecordingVoice) ...[
+                            const SizedBox(height: 16),
+                            const LinearProgressIndicator(),
+                            const SizedBox(height: 8),
+                            const Text('Recording in progress...', style: TextStyle(color: Colors.red)),
                           ],
-                        ),
+                        ],
                       ),
-                    const SizedBox(height: 16),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      alignment: WrapAlignment.center,
-                      children: [
-                        SizedBox(
-                          width: 120,
-                          child: ElevatedButton.icon(
-                            onPressed: _imageFiles.length >= maxImages
-                                ? null
-                                : () => _pickImage(ImageSource.gallery),
-                            icon: const Icon(Icons.photo_library),
-                            label: const Text('Gallery'),
-                          ),
-                        ),
-                        SizedBox(
-                          width: 120,
-                          child: ElevatedButton.icon(
-                            onPressed: _imageFiles.length >= maxImages
-                                ? null
-                                : () => _pickImage(ImageSource.camera),
-                            icon: const Icon(Icons.camera_alt),
-                            label: const Text('Camera'),
-                          ),
-                        ),
-                        SizedBox(
-                          width: 120,
-                          child: ElevatedButton.icon(
-                            onPressed: _imageFiles.length >= maxImages
-                                ? null
-                                : () => _toggleESP32Camera(),
-                            icon: const Icon(Icons.camera),
-                            label: Text(_showCameraPreview ? 'Stop ESP32' : 'ESP32 Camera'),
-                          ),
-                        ),
-                      ],
                     ),
-                    if (_showCameraPreview)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 16.0),
-                        child: ElevatedButton.icon(
-                          onPressed: _captureFromESP32,
-                          icon: const Icon(Icons.camera_alt),
-                          label: const Text('Capture from ESP32'),
-                        ),
-                      ),
+                    
                     const SizedBox(height: 24),
-                    ElevatedButton(
-                      onPressed: _isProcessing ? null : _saveProfile,
-                      child: _isProcessing
-                          ? const CircularProgressIndicator()
-                          : Text(widget.profile == null ? 'Create Profile' : 'Update Profile'),
+                    
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _saveProfile,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                        child: Text(widget.profile == null ? 'Create Profile' : 'Update Profile'),
+                      ),
                     ),
                   ],
                 ),
