@@ -475,7 +475,7 @@ class ApiService {
   }
 
   // This is the fixed method for face recognition attendance
-  static Future<bool> markAttendanceWithFaceRecognition(File imageFile, String? esp32Url) async {
+  static Future<Map<String, dynamic>> markAttendanceWithFaceRecognition(File imageFile, String? esp32Url) async {
     try {
       debugPrint('markAttendanceWithFaceRecognition: Delegating to ApiServiceFix');
       final token = await _getAuthToken();

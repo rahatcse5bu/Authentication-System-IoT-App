@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import 'dart:ui';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:intl/intl.dart';
 
 import '../providers/attendance_provider.dart';
 import '../providers/profile_provider.dart';
@@ -506,32 +507,198 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       
       // Mark attendance with the captured image
       debugPrint('_captureScan: Calling ApiService.markAttendanceWithFaceRecognition');
-      final success = await ApiService.markAttendanceWithFaceRecognition(imageFile, _cachedEsp32Url);
+      final result = await ApiService.markAttendanceWithFaceRecognition(imageFile, _cachedEsp32Url);
+      
+      // Check if we got a successful response but with empty results
+      if (result.containsKey('empty_results') && result['empty_results'] == true) {
+        // Stop the scanning process after attendance
+        _stopScanning();
+        
+        setState(() {
+          _scanCount++;
+          _lastScanTime = DateTime.now();
+          _faceDetectionMessage = 'Attendance processed but no profile data returned';
+          _statusMessage = 'Attendance processed';
+        });
+        
+        // No popup for empty results case
+        return;
+      }
+      
+      // Extract profile information
+      final String profileName = result['profile_name'] ?? 'Unknown';
+      final String regNumber = result['reg_number'] ?? '';
+      final String displayName = regNumber.isNotEmpty ? '$profileName ($regNumber)' : profileName;
+      
+      // Get additional information from the new API response
+      final String action = result['action'] ?? 'time_in';
+      final String actionDisplay = action == 'time_in' ? 'Time In' : (action == 'time_out' ? 'Time Out' : action);
+      final double confidence = result['confidence'] is double ? result['confidence'] as double : 0.0;
+      final String timeStr = result['time'] ?? DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+      final String email = result['email'] ?? '';
+      final String university = result['university'] ?? '';
+      final String bloodGroup = result['blood_group'] ?? '';
+      final String profileImage = result['profile_image'] ?? '';
+      
+      // Stop the scanning process after successful attendance
+      _stopScanning();
       
       setState(() {
         _scanCount++;
         _lastScanTime = DateTime.now();
         _isFaceDetected = true;
-        _faceDetectionMessage = 'Attendance marked successfully!';
+        _faceDetectionMessage = 'Attendance marked for $displayName!';
+        _statusMessage = 'Attendance marked successfully';
       });
       
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Attendance marked successfully')),
+        // Show center dialog instead of bottom SnackBar
+        showDialog(
+          context: context,
+          barrierDismissible: true,
+          builder: (context) => AlertDialog(
+            contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+            title: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.green, size: 24),
+                const SizedBox(width: 8),
+                const Text('Success', style: TextStyle(color: Colors.green)),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // Profile image if available
+                  if (profileImage.isNotEmpty)
+                    Container(
+                      width: 100,
+                      height: 100,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        image: DecorationImage(
+                          image: NetworkImage(profileImage),
+                          fit: BoxFit.cover,
+                        ),
+                        border: Border.all(color: Colors.grey.shade300, width: 3),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 100,
+                      height: 100,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.grey.shade200,
+                        border: Border.all(color: Colors.grey.shade300, width: 3),
+                      ),
+                      child: const Icon(Icons.person, size: 60, color: Colors.grey),
+                    ),
+                  
+                  // Profile name
+                  Text(
+                    profileName,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+                    textAlign: TextAlign.center,
+                  ),
+                  
+                  // Action type with nice badge
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: action == 'time_in' ? Colors.blue.shade50 : Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: action == 'time_in' ? Colors.blue.shade200 : Colors.orange.shade200,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          action == 'time_in' ? Icons.login : Icons.logout,
+                          color: action == 'time_in' ? Colors.blue : Colors.orange,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          actionDisplay,
+                          style: TextStyle(
+                            color: action == 'time_in' ? Colors.blue : Colors.orange,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Profile details table
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade200),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      children: [
+                        // Registration number
+                        if (regNumber.isNotEmpty)
+                          _buildDetailRow('ID', regNumber),
+                          
+                        // Email
+                        if (email.isNotEmpty)
+                          _buildDetailRow('Email', email),
+                          
+                        // University
+                        if (university.isNotEmpty)
+                          _buildDetailRow('University', university),
+                          
+                        // Blood group
+                        if (bloodGroup.isNotEmpty)
+                          _buildDetailRow('Blood Group', bloodGroup),
+                          
+                        // Time
+                        _buildDetailRow('Time', timeStr),
+                        
+                        // Confidence score with color indicator
+                        if (confidence > 0)
+                          _buildDetailRow(
+                            'Match',
+                            '${confidence.toStringAsFixed(1)}%',
+                            valueColor: confidence > 90 ? Colors.green : (confidence > 75 ? Colors.orange : Colors.red),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
         );
       }
     } catch (e) {
       debugPrint('_captureScan error: $e');
+      
+      // Stop the scanning process after an error
+      _stopScanning();
+      
       setState(() {
         _isFaceDetected = false;
         _faceDetectionMessage = 'Error: ${e.toString()}';
+        _statusMessage = 'Error marking attendance';
       });
       
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error marking attendance: $e')),
-        );
-      }
+      // No popup for errors
     }
   }
   
@@ -585,18 +752,177 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
         _faceDetectionMessage = 'Recognizing face...';
       });
       
-      final success = await ApiService.markAttendanceWithFaceRecognition(imageFile, _cachedEsp32Url);
+      final result = await ApiService.markAttendanceWithFaceRecognition(imageFile, _cachedEsp32Url);
+      
+      // Check if we got a successful response but with empty results
+      if (result.containsKey('empty_results') && result['empty_results'] == true) {
+        setState(() {
+          _scanCount++;
+          _lastScanTime = DateTime.now();
+          _faceDetectionMessage = 'Attendance processed but no profile data returned';
+          _statusMessage = 'Attendance processed';
+        });
+        
+        // No popup for empty results
+        return;
+      }
+      
+      // Extract profile information
+      final String profileName = result['profile_name'] ?? 'Unknown';
+      final String regNumber = result['reg_number'] ?? '';
+      final String displayName = regNumber.isNotEmpty ? '$profileName ($regNumber)' : profileName;
+      
+      // Get additional information from the new API response
+      final String action = result['action'] ?? 'time_in';
+      final String actionDisplay = action == 'time_in' ? 'Time In' : (action == 'time_out' ? 'Time Out' : action);
+      final double confidence = result['confidence'] is double ? result['confidence'] as double : 0.0;
+      final String timeStr = result['time'] ?? DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+      final String email = result['email'] ?? '';
+      final String university = result['university'] ?? '';
+      final String bloodGroup = result['blood_group'] ?? '';
+      final String profileImage = result['profile_image'] ?? '';
       
       setState(() {
         _scanCount++;
         _lastScanTime = DateTime.now();
         _isFaceDetected = true;
-        _faceDetectionMessage = 'Attendance marked successfully!';
+        _faceDetectionMessage = 'Attendance marked for $displayName!';
+        _statusMessage = 'Attendance marked successfully';
       });
       
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Attendance marked successfully')),
+        // Show center dialog instead of bottom SnackBar
+        showDialog(
+          context: context,
+          barrierDismissible: true,
+          builder: (context) => AlertDialog(
+            contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+            title: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.green, size: 24),
+                const SizedBox(width: 8),
+                const Text('Success', style: TextStyle(color: Colors.green)),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  // Profile image if available
+                  if (profileImage.isNotEmpty)
+                    Container(
+                      width: 100,
+                      height: 100,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        image: DecorationImage(
+                          image: NetworkImage(profileImage),
+                          fit: BoxFit.cover,
+                        ),
+                        border: Border.all(color: Colors.grey.shade300, width: 3),
+                      ),
+                    )
+                  else
+                    Container(
+                      width: 100,
+                      height: 100,
+                      margin: const EdgeInsets.only(bottom: 16),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.grey.shade200,
+                        border: Border.all(color: Colors.grey.shade300, width: 3),
+                      ),
+                      child: const Icon(Icons.person, size: 60, color: Colors.grey),
+                    ),
+                  
+                  // Profile name
+                  Text(
+                    profileName,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20),
+                    textAlign: TextAlign.center,
+                  ),
+                  
+                  // Action type with nice badge
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: action == 'time_in' ? Colors.blue.shade50 : Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: action == 'time_in' ? Colors.blue.shade200 : Colors.orange.shade200,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          action == 'time_in' ? Icons.login : Icons.logout,
+                          color: action == 'time_in' ? Colors.blue : Colors.orange,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          actionDisplay,
+                          style: TextStyle(
+                            color: action == 'time_in' ? Colors.blue : Colors.orange,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Profile details table
+                  Container(
+                    margin: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.grey.shade200),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      children: [
+                        // Registration number
+                        if (regNumber.isNotEmpty)
+                          _buildDetailRow('ID', regNumber),
+                          
+                        // Email
+                        if (email.isNotEmpty)
+                          _buildDetailRow('Email', email),
+                          
+                        // University
+                        if (university.isNotEmpty)
+                          _buildDetailRow('University', university),
+                          
+                        // Blood group
+                        if (bloodGroup.isNotEmpty)
+                          _buildDetailRow('Blood Group', bloodGroup),
+                          
+                        // Time
+                        _buildDetailRow('Time', timeStr),
+                        
+                        // Confidence score with color indicator
+                        if (confidence > 0)
+                          _buildDetailRow(
+                            'Match',
+                            '${confidence.toStringAsFixed(1)}%',
+                            valueColor: confidence > 90 ? Colors.green : (confidence > 75 ? Colors.orange : Colors.red),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
         );
       }
     } catch (e) {
@@ -604,13 +930,10 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       setState(() {
         _isFaceDetected = false;
         _faceDetectionMessage = 'Error: ${e.toString()}';
+        _statusMessage = 'Error marking attendance';
       });
       
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error marking attendance: $e')),
-        );
-      }
+      // No popup for errors
     } finally {
       if (mounted) {
         setState(() {
@@ -895,6 +1218,40 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     return const Center(
       child: Text('Connecting to camera...', 
         style: TextStyle(color: Colors.grey),
+      ),
+    );
+  }
+
+  // Helper method to build detail rows
+  Widget _buildDetailRow(String label, String value, {Color? valueColor}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+      ),
+      child: Row(
+        children: [
+          Text(
+            label + ':',
+            style: TextStyle(
+              fontWeight: FontWeight.w500,
+              color: Colors.grey.shade700,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(
+                color: valueColor ?? Colors.black87,
+                fontWeight: valueColor != null ? FontWeight.bold : FontWeight.normal,
+                fontSize: 14,
+              ),
+              textAlign: TextAlign.end,
+            ),
+          ),
+        ],
       ),
     );
   }

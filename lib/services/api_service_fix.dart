@@ -12,7 +12,7 @@ class ApiServiceFix {
   static String get _baseUrl => Constants.baseApiUrl;
 
   // Try different endpoints for face recognition attendance marking
-  static Future<bool> markAttendanceWithFaceRecognition(
+  static Future<Map<String, dynamic>> markAttendanceWithFaceRecognition(
       File imageFile, String? esp32Url, String? token) async {
     try {
       debugPrint('FixedAttendance: Starting face recognition process');
@@ -27,9 +27,9 @@ class ApiServiceFix {
       
       // List of endpoints to try, in order of preference
       final List<String> endpointsToTry = [
-        '$_baseUrl/attendance/mark_attendance/',
-        '$_baseUrl/recognition/mark_attendance/',
+        '$_baseUrl/attendance/mark_attendance/',  // This is the correct endpoint according to the latest info
         '$_baseUrl/attendance/mark_with_face/',
+        '$_baseUrl/recognition/mark_attendance/',
         '$_baseUrl/attendance/mark/',
         '$_baseUrl/attendance/',
       ];
@@ -49,11 +49,18 @@ class ApiServiceFix {
             'Authorization': 'Bearer $token',
           });
           
-          // Add ESP32 camera URL if available (try both field names)
+          // Add required fields - add 'field' parameter that seems to be required
           if (esp32Url != null && esp32Url.isNotEmpty) {
             request.fields['esp32_url'] = esp32Url;
             request.fields['esp32_camera_url'] = esp32Url;
           }
+          
+          // Add basic required fields (these might be expected by the API)
+          request.fields['timestamp'] = DateTime.now().toIso8601String();
+          request.fields['request_id'] = DateTime.now().millisecondsSinceEpoch.toString();
+          
+          // Add the required 'profile' field
+          request.fields['profile'] = 'auto_detect'; // This field is required by the API
           
           // Add image file (only with 'image' field name as specified in API docs)
           final bytes = await imageFile.readAsBytes();
@@ -73,16 +80,132 @@ class ApiServiceFix {
           debugPrint('FixedAttendance: Response status: ${response.statusCode}');
           debugPrint('FixedAttendance: Response body: ${response.body}');
           
-          // If successful, return true
+          // If successful, parse the new response format
           if (response.statusCode == 200 || response.statusCode == 201) {
             debugPrint('FixedAttendance: Success with endpoint $endpoint');
-            return true;
+            debugPrint('FixedAttendance: Full response body: ${response.body}');
+            
+            // Try to parse the response JSON to get profile information
+            try {
+              final Map<String, dynamic> responseData = jsonDecode(response.body);
+              
+              // Log all keys in the response for debugging
+              debugPrint('FixedAttendance: Response keys: ${responseData.keys.toList()}');
+              
+              // The new API returns results as an array
+              if (responseData.containsKey('results') && responseData['results'] is List) {
+                // Check if the results array is empty
+                if (responseData['results'].isEmpty) {
+                  debugPrint('FixedAttendance: Warning - Results array is empty. This might be a backend issue.');
+                  
+                  // Return a special response indicating empty results
+                  return {
+                    'success': true,
+                    'empty_results': true,
+                    'profile_name': 'No Profile Found',
+                    'message': 'The server processed the request but did not return any profile data.',
+                    'raw_response': responseData
+                  };
+                }
+                
+                final firstResult = responseData['results'][0];
+                
+                final String profileName = firstResult['name'] ?? 'Unknown';
+                final String regNumber = firstResult['reg_number'] ?? '';
+                final String email = firstResult['email'] ?? '';
+                final String university = firstResult['university'] ?? '';
+                final String bloodGroup = firstResult['blood_group'] ?? '';
+                final String action = firstResult['action'] ?? 'time_in';
+                final String time = firstResult['time'] ?? DateTime.now().toIso8601String();
+                final double confidence = firstResult['confidence'] is num ? (firstResult['confidence'] as num).toDouble() : 0.0;
+                final String profileImage = firstResult['image'] ?? '';
+                
+                debugPrint('FixedAttendance: Attendance marked for $profileName ($regNumber) with $confidence% confidence');
+                
+                return {
+                  'success': true,
+                  'profile_name': profileName,
+                  'reg_number': regNumber,
+                  'email': email,
+                  'university': university,
+                  'blood_group': bloodGroup,
+                  'action': action,
+                  'time': time,
+                  'confidence': confidence,
+                  'profile_image': profileImage,
+                  'raw_response': responseData
+                };
+              } else {
+                // Fallback to the old format if 'results' key is not present
+                final String profileName = responseData['profile_name'] ?? 
+                                          responseData['name'] ?? 
+                                          responseData['profile']?['name'] ??
+                                          responseData['user_name'] ??
+                                          'Unknown';
+                
+                final String regNumber = responseData['reg_number'] ?? 
+                                        responseData['profile']?['reg_number'] ?? 
+                                        responseData['registration_number'] ??
+                                        '';
+                
+                debugPrint('FixedAttendance: Attendance marked for $profileName ($regNumber) using old format');
+                
+                return {
+                  'success': true,
+                  'profile_name': profileName,
+                  'reg_number': regNumber,
+                  'timestamp': DateTime.now().toString(),
+                  'raw_response': responseData
+                };
+              }
+            } catch (parseError) {
+              debugPrint('FixedAttendance: Could not parse profile info: $parseError');
+              // Return success with limited info if we can't parse the response
+              return {
+                'success': true,
+                'profile_name': 'Unknown',
+                'timestamp': DateTime.now().toString()
+              };
+            }
           }
           
           // If not 405 (Method Not Allowed), check common error conditions
           if (response.statusCode != 405) {
-            if (response.statusCode == 400 && response.body.toLowerCase().contains('no face')) {
-              throw Exception('No face detected in the image. Please try again with a clearer image.');
+            if (response.statusCode == 400) {
+              // For 400 Bad Request, try to parse the error message to find the missing field
+              try {
+                final errorData = jsonDecode(response.body);
+                debugPrint('FixedAttendance: 400 error details: $errorData');
+                
+                // If the error contains field validation errors
+                if (errorData is Map) {
+                  // Check for common field error messages
+                  final missingFields = <String>[];
+                  errorData.forEach((key, value) {
+                    if (value is List && value.isNotEmpty) {
+                      missingFields.add('$key (${value.first})');
+                    } else if (value is String) {
+                      missingFields.add('$key ($value)');
+                    }
+                  });
+                  
+                  if (missingFields.isNotEmpty) {
+                    lastException = Exception('Missing required fields: ${missingFields.join(", ")}');
+                    continue;
+                  }
+                }
+                
+                // If we couldn't determine specific fields
+                if (response.body.toLowerCase().contains('no face')) {
+                  throw Exception('No face detected in the image. Please try again with a clearer image.');
+                } else {
+                  lastException = Exception('Bad request: ${response.body}');
+                  continue;
+                }
+              } catch (e) {
+                lastException = Exception('Bad request: ${response.body}');
+                continue;
+              }
             } else if (response.statusCode == 404 && response.body.toLowerCase().contains('not recognized')) {
               throw Exception('Face not recognized. Please register your profile first.');
             } else if (response.statusCode == 401) {
