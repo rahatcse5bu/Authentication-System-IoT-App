@@ -12,7 +12,7 @@ class AudioRecorderService {
   
   AudioRecorderService._internal();
   
-  final _audioRecorder = Record();
+  final _audioRecorder = AudioRecorder();
   final _audioPlayer = AudioPlayer();
   bool _isRecording = false;
   bool _isPlaying = false;
@@ -63,34 +63,37 @@ class AudioRecorderService {
         throw Exception('Microphone permission denied');
       }
       
-      // Prepare recorder
-      if (await _audioRecorder.hasPermission()) {
-        // Prepare destination path
-        final appDir = await getApplicationDocumentsDirectory();
-        final timestamp = DateTime.now().millisecondsSinceEpoch;
-        final filePath = '${appDir.path}/voice_record_$timestamp.wav';
-        
-        // Configure recording
-        await _audioRecorder.start(
-          path: filePath,
-          encoder: AudioEncoder.wav, // Using WAV format for quality
-          bitRate: 128000,
-          samplingRate: 44100,
-        );
-        
-        // Listen to recording state
-        _recordSub?.cancel();
-        _recordSub = _audioRecorder.onStateChanged().listen((recordState) {
-          debugPrint('Recording state: $recordState');
-        });
-        
-        _isRecording = true;
-        _recordedFilePath = filePath;
-        
-        return true;
-      } else {
+      // Check and request microphone permission
+      final isPermitted = await _audioRecorder.hasPermission();
+      if (!isPermitted) {
         throw Exception('Audio recording permissions not granted');
       }
+      
+      // Prepare destination path
+      final appDir = await getApplicationDocumentsDirectory();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final filePath = '${appDir.path}/voice_record_$timestamp.wav';
+      
+      // Configure recording
+      await _audioRecorder.start(
+        RecordConfig(
+          encoder: AudioEncoder.wav,  // Using WAV format for quality
+          bitRate: 128000,
+          sampleRate: 44100,
+        ), 
+        path: filePath,
+      );
+      
+      // Get the recorder state
+      _recordSub?.cancel();
+      _recordSub = _audioRecorder.onStateChanged().listen((recordState) {
+        debugPrint('Recording state: $recordState');
+      });
+      
+      _isRecording = true;
+      _recordedFilePath = filePath;
+      
+      return true;
     } catch (e) {
       debugPrint('Error starting recording: $e');
       return false;
