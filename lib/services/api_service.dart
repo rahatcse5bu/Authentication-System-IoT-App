@@ -16,6 +16,8 @@ import '../models/profile.dart';
 import '../utils/constants.dart';
 import '../providers/settings_provider.dart';
 import '../providers/profile_provider.dart';
+import '../services/face_detection_service.dart';
+import '../services/api_service_fix.dart';
 
 class ApiService {
   static String get _baseUrl => Constants.baseApiUrl;
@@ -221,34 +223,38 @@ class ApiService {
         request.fields['university'] = profile.university;
       }
       
-      // Add the first image file
-      final firstImageFile = imageFiles[0];
-      debugPrint('createProfile: Adding first image from file: ${firstImageFile.path}');
-      try {
-        final bytes = await firstImageFile.readAsBytes();
-        debugPrint('createProfile: Successfully read ${bytes.length} bytes from image file');
-        
-        // Add image with both field names
-        request.files.add(
-          http.MultipartFile.fromBytes(
-            'image',
-            bytes,
-            filename: firstImageFile.path.split('/').last,
-            contentType: MediaType('image', 'jpeg'),
-          )
-        );
-        
-        request.files.add(
-          http.MultipartFile.fromBytes(
-            'face_images',
-            bytes,
-            filename: firstImageFile.path.split('/').last,
-            contentType: MediaType('image', 'jpeg'),
-          )
-        );
-      } catch (e) {
-        debugPrint('createProfile: Error reading image file: $e');
-        throw Exception('Error reading image file: $e');
+      // Add all face images
+      for (var i = 0; i < imageFiles.length; i++) {
+        final imageFile = imageFiles[i];
+        debugPrint('createProfile: Adding image ${i + 1} from file: ${imageFile.path}');
+        try {
+          final bytes = await imageFile.readAsBytes();
+          
+          // First image is also sent as 'image' for backward compatibility
+          if (i == 0) {
+            request.files.add(
+              http.MultipartFile.fromBytes(
+                'image',
+                bytes,
+                filename: imageFile.path.split('/').last,
+                contentType: MediaType('image', 'jpeg'),
+              )
+            );
+          }
+          
+          // All images are sent as 'face_images'
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'face_images',
+              bytes,
+              filename: imageFile.path.split('/').last,
+              contentType: MediaType('image', 'jpeg'),
+            )
+          );
+        } catch (e) {
+          debugPrint('createProfile: Error reading image file: $e');
+          throw Exception('Error reading image file: $e');
+        }
       }
       
       // Send request
@@ -262,16 +268,11 @@ class ApiService {
       if (response.statusCode == 201) {
         final profileJson = jsonDecode(response.body);
         debugPrint('createProfile: Profile created successfully');
-        
-        // If there are more images, add them using addFaceImages
-        if (imageFiles.length > 1) {
-          debugPrint('createProfile: Adding remaining ${imageFiles.length - 1} images');
-          final createdProfile = Profile.fromJson(profileJson);
-          await addFaceImages(createdProfile.id!, imageFiles.sublist(1));
-          return createdProfile;
-        }
-        
         return Profile.fromJson(profileJson);
+      } else if (response.statusCode == 400 && response.body.toLowerCase().contains('no face')) {
+        // Face detection error from backend
+        debugPrint('createProfile: Backend reported no face or face detection error');
+        throw Exception('The server could not detect faces in the provided images. Please try with clearer images that show faces clearly.');
       } else {
         throw Exception('Failed to create profile: ${response.body}');
       }
@@ -474,40 +475,24 @@ class ApiService {
   }
 
   // This is the fixed method for face recognition attendance
-  static Future<Map<String, dynamic>> markAttendanceWithFaceRecognition() async {
-    debugPrint('markAttendanceWithFaceRecognition: Starting attendance marking with face recognition');
-    
-    if (_esp32Url == null || _esp32Url!.isEmpty) {
-      debugPrint('markAttendanceWithFaceRecognition: ESP32 URL is not configured');
-      throw Exception('ESP32 camera URL not configured');
-    }
-    
-    debugPrint('markAttendanceWithFaceRecognition: Using ESP32 URL: $_esp32Url');
-    
+  static Future<bool> markAttendanceWithFaceRecognition(File imageFile, String? esp32Url) async {
     try {
-      final requestBody = {'esp32_url': _esp32Url};
-      debugPrint('markAttendanceWithFaceRecognition: Request body: $requestBody');
+      debugPrint('markAttendanceWithFaceRecognition: Delegating to ApiServiceFix');
+      final token = await _getAuthToken();
       
-      final response = await http.post(
-        Uri.parse('$_baseUrl/attendance/mark_attendance/'),
-        headers: _getAuthHeaders(),
-        body: jsonEncode(requestBody),
-      );
-      
-      debugPrint('markAttendanceWithFaceRecognition: Response status: ${response.statusCode}');
-      debugPrint('markAttendanceWithFaceRecognition: Response body: ${response.body}');
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        debugPrint('markAttendanceWithFaceRecognition: Attendance marked successfully');
-        return data;
-      } else {
-        debugPrint('markAttendanceWithFaceRecognition: Failed to mark attendance: ${response.body}');
-        throw Exception('Failed to mark attendance: ${response.body}');
+      if (token == null) {
+        debugPrint('markAttendanceWithFaceRecognition: Authentication token is null. Please log in again.');
+        throw Exception('Authentication required. Please log in again.');
       }
+      
+      // Log token format (first few characters)
+      debugPrint('markAttendanceWithFaceRecognition: Using token format: ${token.length > 5 ? token.substring(0, 5) + "..." : token}');
+      
+      // Use the fixed implementation that tries multiple endpoints
+      return await ApiServiceFix.markAttendanceWithFaceRecognition(imageFile, esp32Url, token);
     } catch (e) {
       debugPrint('markAttendanceWithFaceRecognition error: $e');
-      throw Exception('Error marking attendance: $e');
+      rethrow;
     }
   }
 
@@ -813,6 +798,29 @@ class ApiService {
     }
   }
 
+  // Helper method to get the authentication token
+  static Future<String?> _getToken() async {
+    // Return cached token if available
+    if (_token != null) {
+      return _token;
+    }
+    
+    // Try to load token from preferences
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _token = prefs.getString('auth_token');
+      return _token;
+    } catch (e) {
+      debugPrint('_getToken error: $e');
+      return null;
+    }
+  }
+  
+  // For backward compatibility - aliases to _getToken
+  static Future<String?> _getAuthToken() async {
+    return _getToken();
+  }
+
   // Get the latest image from ESP32 camera for preview
   static Future<Uint8List?> getEsp32CameraPreview() async {
     if (_esp32Url == null || _esp32Url!.isEmpty) {
@@ -935,57 +943,12 @@ class ApiService {
       if (response.statusCode == 200) {
         // Get the updated profile after adding images
         return await getProfileById(profileId);
+      } else if (response.statusCode == 400 && response.body.toLowerCase().contains('no face')) {
+        // Face detection error from backend
+        debugPrint('addFaceImages: Backend reported no face or face detection error');
+        throw Exception('The server could not detect faces in the provided images. Please try with clearer images that show faces clearly.');
       } else {
-        // If we get a face detection error, try to add images one by one
-        if (response.statusCode == 400 && response.body.contains('No face detected')) {
-          debugPrint('addFaceImages: Face detection failed for batch, trying individual images');
-          
-          // Get the current profile
-          final currentProfile = await getProfileById(profileId);
-          
-          // Try to add each image individually
-          for (var i = 0; i < imageFiles.length; i++) {
-            final imageFile = imageFiles[i];
-            try {
-              debugPrint('addFaceImages: Trying to add image ${i + 1} individually');
-              
-              // Create new request for single image
-              var singleRequest = http.MultipartRequest(
-                'POST', 
-                Uri.parse('$_baseUrl/profiles/$profileId/add_face_images/')
-              );
-              singleRequest.headers.addAll(headers);
-              
-              final bytes = await imageFile.readAsBytes();
-              singleRequest.files.add(
-                http.MultipartFile.fromBytes(
-                  'face_images',
-                  bytes,
-                  filename: imageFile.path.split('/').last,
-                  contentType: MediaType('image', 'jpeg'),
-                )
-              );
-              
-              final singleStreamedResponse = await singleRequest.send();
-              final singleResponse = await http.Response.fromStream(singleStreamedResponse);
-              
-              if (singleResponse.statusCode != 200) {
-                debugPrint('addFaceImages: Failed to add image ${i + 1}: ${singleResponse.body}');
-                // Continue with next image
-                continue;
-              }
-            } catch (e) {
-              debugPrint('addFaceImages: Error adding image ${i + 1} individually: $e');
-              // Continue with next image
-              continue;
-            }
-          }
-          
-          // Return the updated profile after trying all images
-          return await getProfileById(profileId);
-        } else {
-          throw Exception('Failed to add face images: ${response.body}');
-        }
+        throw Exception('Failed to add face images: ${response.body}');
       }
     } catch (e) {
       debugPrint('addFaceImages error: $e');
@@ -995,47 +958,49 @@ class ApiService {
 
   // Check if an image contains a face
   static Future<bool> checkFace(File imageFile) async {
-    debugPrint('checkFace: Checking image for face: ${imageFile.path}');
+    debugPrint('checkFace: Checking if image contains a face');
     try {
-      // Create multipart request
-      var request = http.MultipartRequest(
-        'POST', 
-        Uri.parse('$_baseUrl/profiles/check_face/')
-      );
+      final token = await _getToken();
+      if (token == null) {
+        throw Exception('Authentication token is null');
+      }
       
-      // Add auth headers
-      final headers = _getAuthHeaders(isMultipart: true);
-      request.headers.addAll(headers);
+      final uri = Uri.parse('$_baseUrl/profiles/check_face/');
+      final request = http.MultipartRequest('POST', uri);
+      
+      // Add auth header
+      request.headers.addAll({
+        'Authorization': 'Bearer $token',
+      });
       
       // Add image file
       final bytes = await imageFile.readAsBytes();
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'image',
-          bytes,
-          filename: imageFile.path.split('/').last,
-          contentType: MediaType('image', 'jpeg'),
-        )
+      final file = http.MultipartFile.fromBytes(
+        'image', 
+        bytes,
+        filename: 'face_image.jpg',
+        contentType: MediaType('image', 'jpeg'),
       );
+      request.files.add(file);
       
-      // Send request
+      debugPrint('checkFace: Sending request to $uri');
       final streamedResponse = await request.send();
       final response = await http.Response.fromStream(streamedResponse);
       
-      debugPrint('checkFace: Response status: ${response.statusCode}');
-      debugPrint('checkFace: Response body: ${response.body}');
-      
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final hasFace = data['has_face'] as bool;
-        debugPrint('checkFace: Image ${hasFace ? "contains" : "does not contain"} a face');
-        return hasFace;
-      } else {
-        throw Exception('Failed to check face: ${response.body}');
+      if (response.statusCode != 200) {
+        final errorBody = response.body;
+        debugPrint('checkFace error: ${response.statusCode}, $errorBody');
+        return false;
       }
+      
+      final responseData = jsonDecode(response.body);
+      final hasFace = responseData['has_face'] ?? false;
+      
+      debugPrint('checkFace: Has face: $hasFace');
+      return hasFace;
     } catch (e) {
       debugPrint('checkFace error: $e');
-      throw Exception('Error checking face: $e');
+      return false;
     }
   }
 }

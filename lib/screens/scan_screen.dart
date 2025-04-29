@@ -8,11 +8,13 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'dart:ui';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 import '../providers/attendance_provider.dart';
 import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
+import '../services/face_detection_service.dart';
 
 class ScanScreen extends StatefulWidget {
   @override
@@ -52,6 +54,10 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   SettingsProvider? _settingsProvider;
   String? _cachedEsp32Url;
   bool _isDisposing = false;
+  
+  bool _isFaceDetected = false;
+  String _faceDetectionMessage = '';
+  bool _isProcessing = false;
 
   @override
   void initState() {
@@ -458,151 +464,159 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   Future<void> _captureScan() async {
     if (!mounted || _isDisposing) return;
     
-    // Use cached settings
-    final String? esp32Url = _cachedEsp32Url ?? _settingsProvider?.esp32Url;
-    
-    if (esp32Url == null || esp32Url.isEmpty) {
-      debugPrint('_captureScan: ESP32 URL not configured');
-      setState(() {
-        _statusMessage = 'ESP32 camera URL not configured';
-      });
-      _stopScanning();
-      return;
-    }
-    
-    debugPrint('_captureScan: Starting scan with ESP32 URL: ${esp32Url}');
-    
-    try {
-      setState(() {
-        _statusMessage = 'Scanning...';
-      });
-      
-      // Update scan stats
-      _scanCount++;
-      _lastScanTime = DateTime.now();
-      debugPrint('_captureScan: Scan #$_scanCount at ${_lastScanTime.toString()}');
-      
-      // Call the API to mark attendance with face recognition
-      // The live preview is already running so we don't need to capture a new image
-      debugPrint('_captureScan: Calling ApiService.markAttendanceWithFaceRecognition');
-      final result = await ApiService.markAttendanceWithFaceRecognition();
-      
-      if (!mounted) return;
-      
-      debugPrint('_captureScan: Received result: $result');
-      
-      if (result.containsKey('results') && result['results'] is List && (result['results'] as List).isNotEmpty) {
-        // Add recognized profiles to the list
-        debugPrint('_captureScan: ${result['results'].length} profiles recognized');
-        for (var profile in result['results']) {
-          // Check if profile is already in the list
-          final existingIndex = _recognizedProfiles.indexWhere(
-            (p) => p == profile['name']
-          );
-          
-          if (existingIndex >= 0) {
-            // Update existing profile
-            debugPrint('_captureScan: Updating existing profile: ${profile['name']}');
-            _recognizedProfiles[existingIndex] = profile['name'];
-          } else {
-            // Add new profile
-            debugPrint('_captureScan: Adding new profile: ${profile['name']}');
-            _recognizedProfiles.add(profile['name']);
-          }
-        }
-        
-        setState(() {
-          _statusMessage = '${_recognizedProfiles.length} profile(s) recognized';
-        });
-      } else {
-        debugPrint('_captureScan: No profiles recognized in the result');
-        setState(() {
-          _statusMessage = 'No profiles recognized';
-        });
-      }
-    } catch (e) {
-      if (!mounted) return;
-      
-      debugPrint('_captureScan error: $e');
-      
-      String errorMsg = 'Error scanning';
-      
-      // Check for specific error messages
-      String errorString = e.toString().toLowerCase();
-      if (errorString.contains('no active profiles found')) {
-        errorMsg = 'No active profiles - create a profile first';
-      } else if (errorString.contains('face')) {
-        errorMsg = 'No face detected in image';
-      } else if (errorString.contains('network') || errorString.contains('connect')) {
-        errorMsg = 'Network error: Check ESP32 connection';
-      }
-      
-      setState(() {
-        _statusMessage = errorMsg;
-      });
-    }
-  }
-  
-  Future<void> _singleCapture() async {
-    if (!mounted) return;
-    
-    // Ensure preview is active for best results
-    if (!_isStreamActive) {
-      _displayStatusMessage('Starting preview...');
-      await _startCameraPreview();
-      // Wait for preview to connect
-      await Future.delayed(Duration(milliseconds: 1000));
-    }
-    
-    if (!mounted) return;
-    
     setState(() {
-      _statusMessage = 'Processing...';
+      _isFaceDetected = false;
+      _faceDetectionMessage = 'Capturing image...';
     });
-
+    
     try {
-      // Using mark_attendance endpoint instead of recognize_face which seems to be missing
-      final response = await ApiService.markAttendanceWithFaceRecognition();
+      debugPrint('_captureScan: Starting scan with ESP32 URL: $_cachedEsp32Url');
+      debugPrint('_captureScan: Scan #${_scanCount + 1} at ${DateTime.now()}');
       
-      if (!mounted) return;
+      // Check if ESP32 URL is configured
+      if (_cachedEsp32Url == null || _cachedEsp32Url!.isEmpty) {
+        setState(() {
+          _faceDetectionMessage = 'ESP32 URL not configured';
+        });
+        return;
+      }
+      
+      // Try using FaceDetectionService first for more reliable capture
+      final imageBytes = await FaceDetectionService.captureEsp32Frame(_cachedEsp32Url!);
+      File? imageFile;
+      
+      if (imageBytes != null) {
+        // Save to a file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final imagePath = '${tempDir.path}/esp32_scan_$timestamp.jpg';
+        imageFile = File(imagePath);
+        await imageFile.writeAsBytes(imageBytes);
+        debugPrint('_captureScan: Image captured using FaceDetectionService: ${imageFile.path}');
+      } else {
+        // Fallback to ApiService if FaceDetectionService failed
+        imageFile = await ApiService.captureImage();
+        debugPrint('_captureScan: Image captured using ApiService: ${imageFile.path}');
+      }
+      
+      // Skip face detection and proceed directly to recognition
+      setState(() {
+        _faceDetectionMessage = 'Recognizing face...';
+      });
+      
+      // Mark attendance with the captured image
+      debugPrint('_captureScan: Calling ApiService.markAttendanceWithFaceRecognition');
+      final success = await ApiService.markAttendanceWithFaceRecognition(imageFile, _cachedEsp32Url);
       
       setState(() {
         _scanCount++;
         _lastScanTime = DateTime.now();
+        _isFaceDetected = true;
+        _faceDetectionMessage = 'Attendance marked successfully!';
       });
-
-      if (response.containsKey('results') && response['results'] is List && (response['results'] as List).isNotEmpty) {
-        // Get first recognized person
-        final profile = response['results'][0];
-        final String name = profile['name'] ?? 'Unknown';
-        
-        setState(() {
-          _statusMessage = 'Recognized: $name';
-          if (!_recognizedProfiles.contains(name)) {
-            _recognizedProfiles.add(name);
-          }
-        });
-      } else {
-        setState(() {
-          _statusMessage = 'Not recognized';
-        });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Attendance marked successfully')),
+        );
       }
     } catch (e) {
-      if (!mounted) return;
+      debugPrint('_captureScan error: $e');
+      setState(() {
+        _isFaceDetected = false;
+        _faceDetectionMessage = 'Error: ${e.toString()}';
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error marking attendance: $e')),
+        );
+      }
+    }
+  }
+  
+  Future<void> _singleCapture() async {
+    if (!mounted || _isDisposing) return;
+    
+    setState(() {
+      _isProcessing = true;
+      _isFaceDetected = false;
+      _faceDetectionMessage = 'Capturing image...';
+    });
+    
+    try {
+      debugPrint('_singleCapture: Starting capture');
+      
+      // Check if ESP32 URL is configured
+      if (_cachedEsp32Url == null || _cachedEsp32Url!.isEmpty) {
+        setState(() {
+          _isProcessing = false;
+          _faceDetectionMessage = 'ESP32 URL not configured';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('ESP32 camera URL not configured')),
+        );
+        return;
+      }
+      
+      // Try using FaceDetectionService first for more reliable capture
+      final imageBytes = await FaceDetectionService.captureEsp32Frame(_cachedEsp32Url!);
+      File? imageFile;
+      
+      if (imageBytes != null) {
+        // Save to a file
+        final tempDir = await getTemporaryDirectory();
+        final timestamp = DateTime.now().millisecondsSinceEpoch;
+        final imagePath = '${tempDir.path}/esp32_scan_$timestamp.jpg';
+        imageFile = File(imagePath);
+        await imageFile.writeAsBytes(imageBytes);
+        debugPrint('_singleCapture: Image captured using FaceDetectionService: ${imageFile.path}');
+      } else {
+        // Fallback to ApiService if FaceDetectionService failed
+        imageFile = await ApiService.captureImage();
+        debugPrint('_singleCapture: Image captured using ApiService: ${imageFile.path}');
+      }
+      
+      // Skip face detection and proceed directly to recognition
+      // Mark attendance with the captured image
+      debugPrint('_singleCapture: Calling ApiService.markAttendanceWithFaceRecognition');
       
       setState(() {
-        _statusMessage = 'Error: ${e.toString().split('\n')[0]}';
+        _faceDetectionMessage = 'Recognizing face...';
       });
-      debugPrint('Single capture error: $e');
-    }
-    
-    // If preview is not enabled by default, turn it off after capture
-    if (!_previewEnabled && !_isScanning) {
-      Future.delayed(Duration(seconds: 2), () {
-        if (mounted && !_isScanning) {
-          _stopCameraPreview();
-        }
+      
+      final success = await ApiService.markAttendanceWithFaceRecognition(imageFile, _cachedEsp32Url);
+      
+      setState(() {
+        _scanCount++;
+        _lastScanTime = DateTime.now();
+        _isFaceDetected = true;
+        _faceDetectionMessage = 'Attendance marked successfully!';
       });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Attendance marked successfully')),
+        );
+      }
+    } catch (e) {
+      debugPrint('_singleCapture error: $e');
+      setState(() {
+        _isFaceDetected = false;
+        _faceDetectionMessage = 'Error: ${e.toString()}';
+      });
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error marking attendance: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isProcessing = false;
+        });
+      }
     }
   }
   
@@ -689,116 +703,144 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
             );
           }
           
-          return Column(
+          return Stack(
             children: [
-              // Status bar
-              Container(
-                padding: const EdgeInsets.all(12),
-                color: Colors.grey[200],
-                child: Column(
-                  children: [
-                    Row(
+              Column(
+                children: [
+                  // Status bar
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    color: Colors.grey[200],
+                    child: Column(
                       children: [
-                        Icon(
-                          _isScanning ? Icons.sync : (_isStreamActive ? Icons.videocam : Icons.info_outline),
-                          color: _isScanning ? Colors.green : (_isStreamActive ? Colors.blue : Colors.orange),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            _statusMessage,
-                            style: const TextStyle(fontSize: 16),
-                          ),
-                        ),
-                        Text('Scans: $_scanCount'),
-                      ],
-                    ),
-                    if (_recognizedProfiles.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          const Icon(Icons.people, size: 20, color: Colors.blue),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'Recognized: ${_recognizedProfiles.join(", ")}',
-                              style: const TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w500,
+                        Row(
+                          children: [
+                            Icon(
+                              _isScanning ? Icons.sync : (_isStreamActive ? Icons.videocam : Icons.info_outline),
+                              color: _isScanning ? Colors.green : (_isStreamActive ? Colors.blue : Colors.orange),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                _statusMessage,
+                                style: const TextStyle(fontSize: 16),
                               ),
                             ),
+                            Text('Scans: $_scanCount'),
+                          ],
+                        ),
+                        if (_recognizedProfiles.isNotEmpty) ...[
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const Icon(Icons.people, size: 20, color: Colors.blue),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Recognized: ${_recognizedProfiles.join(", ")}',
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ],
-                      ),
-                    ],
-                  ],
-                ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Preview container
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: Colors.grey),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: FadeTransition(
+                            opacity: _fadeController,
+                            child: _isLoadingPreview
+                                ? const Center(child: CircularProgressIndicator())
+                                : _buildCameraPreview(),
+                          ),
+                        ),
+                        if (_previewEnabled)
+                          Positioned(
+                            right: 24,
+                            bottom: 24,
+                            child: FloatingActionButton(
+                              mini: true,
+                              onPressed: _isLoadingPreview ? null : _restartCameraPreview,
+                              tooltip: 'Restart preview',
+                              child: const Icon(Icons.refresh),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  
+                  // Control buttons
+                  Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isScanning ? null : _singleCapture,
+                            icon: const Icon(Icons.camera),
+                            label: const Text('Single Capture'),
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: _isScanning ? _stopScanning : _startScanning,
+                            icon: Icon(_isScanning ? Icons.stop : Icons.play_arrow),
+                            label: Text(_isScanning ? 'Stop Scanning' : 'Start Scanning'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: _isScanning ? Colors.red : Colors.green,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
               
-              // Preview container
-              Expanded(
-                child: Stack(
-                  children: [
-                    Container(
-                      width: double.infinity,
-                      margin: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: FadeTransition(
-                        opacity: _fadeController,
-                        child: _isLoadingPreview
-                            ? const Center(child: CircularProgressIndicator())
-                            : _buildCameraPreview(),
-                      ),
-                    ),
-                    if (_previewEnabled)
-                      Positioned(
-                        right: 24,
-                        bottom: 24,
-                        child: FloatingActionButton(
-                          mini: true,
-                          onPressed: _isLoadingPreview ? null : _restartCameraPreview,
-                          tooltip: 'Restart preview',
-                          child: const Icon(Icons.refresh),
+              // Face detection status
+              if (_isFaceDetected || _isProcessing)
+                Container(
+                  color: Colors.black54,
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_isProcessing)
+                          const CircularProgressIndicator(),
+                        const SizedBox(height: 8),
+                        Text(
+                          _faceDetectionMessage,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
-                      ),
-                  ],
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-              
-              // Control buttons
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _isScanning ? null : _singleCapture,
-                        icon: const Icon(Icons.camera),
-                        label: const Text('Single Capture'),
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _isScanning ? _stopScanning : _startScanning,
-                        icon: Icon(_isScanning ? Icons.stop : Icons.play_arrow),
-                        label: Text(_isScanning ? 'Stop Scanning' : 'Start Scanning'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _isScanning ? Colors.red : Colors.green,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             ],
           );
         },

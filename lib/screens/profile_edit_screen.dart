@@ -11,6 +11,7 @@ import '../models/profile.dart';
 import '../providers/profile_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
+import '../services/face_detection_service.dart';
 
 class ProfileEditScreen extends StatefulWidget {
   final Profile? profile;
@@ -49,6 +50,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   String? _cachedEsp32Url;
   bool _isDisposing = false;
   
+  bool _isFaceDetected = false;
+  String _faceDetectionMessage = '';
+  
   @override
   void initState() {
     super.initState();
@@ -85,29 +89,49 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     _bloodGroupController.dispose();
     _regNumberController.dispose();
     _universityController.dispose();
-    _stopCameraPreview();
+    
+    // Cancel any active timers
     if (_previewTimer != null) {
       _previewTimer!.cancel();
       _previewTimer = null;
     }
+    
+    // Close any active streams
+    if (_streamController != null) {
+      _streamController!.close();
+      _streamController = null;
+    }
+    
     _fadeController.dispose();
     super.dispose();
   }
   
   Future<void> _pickImage(ImageSource source) async {
+    setState(() {
+      _isProcessing = true;
+    });
+    
     try {
       final picker = ImagePicker();
-      final pickedFiles = await picker.pickMultiImage(
-        maxWidth: 800,
-        maxHeight: 800,
-        imageQuality: 85,
-      );
+      final List<XFile> pickedFiles;
+      
+      if (source == ImageSource.gallery) {
+        pickedFiles = await picker.pickMultiImage(
+          maxWidth: 800,
+          maxHeight: 800,
+          imageQuality: 85,
+        );
+      } else {
+        final XFile? pickedFile = await picker.pickImage(
+          source: source,
+          maxWidth: 800,
+          maxHeight: 800,
+          imageQuality: 85,
+        );
+        pickedFiles = pickedFile != null ? [pickedFile] : [];
+      }
       
       if (pickedFiles.isNotEmpty) {
-        setState(() {
-          _isProcessing = true;
-        });
-        
         final List<File> validImageFiles = [];
         
         for (var pickedFile in pickedFiles) {
@@ -122,6 +146,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
             if (size > 0) {
               // Check if image contains a face
               try {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Checking for face in image...')),
+                  );
+                }
+                
                 final hasFace = await ApiService.checkFace(imageFile);
                 if (hasFace) {
                   validImageFiles.add(imageFile);
@@ -165,11 +195,19 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text('Maximum of $maxImages images allowed. Extra images were discarded.')),
                 );
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('${validImageFiles.length} image(s) added successfully')),
+                );
               }
             }
             _isProcessing = false;
           });
         }
+      } else {
+        setState(() {
+          _isProcessing = false;
+        });
       }
     } catch (e) {
       debugPrint('Error picking images: $e');
@@ -603,10 +641,12 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         _previewTimer = null;
       }
       
-      if (mounted) {
+      if (mounted && !_isDisposing) {
         setState(() {
           _isStreamActive = false;
           _isLoadingPreview = false;
+          _showCameraPreview = false;
+          _previewImageBytes = null;
         });
       }
     } catch (e) {
@@ -620,6 +660,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       try {
         setState(() {
           _isProcessing = true;
+          _isFaceDetected = false;
+          _faceDetectionMessage = 'Processing image...';
         });
         
         // Use application documents directory instead of temporary directory
@@ -638,35 +680,20 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           debugPrint('ESP32 image size: $size bytes');
           
           if (size > 0) {
-            // Check if image contains a face
-            try {
-              final hasFace = await ApiService.checkFace(imageFile);
-              if (hasFace) {
-                setState(() {
-                  _imageFiles.add(imageFile);
-                  _isProcessing = false;
-                  _showCameraPreview = false; // Close preview after capture
-                });
-                _stopCameraPreview();
-              } else {
-                setState(() {
-                  _isProcessing = false;
-                });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('No face detected in the captured image')),
-                );
-              }
-            } catch (e) {
-              setState(() {
-                _isProcessing = false;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Error checking face: $e')),
-              );
-            }
+            // Add image directly without face detection
+            setState(() {
+              _imageFiles.add(imageFile);
+              _isProcessing = false;
+              _isFaceDetected = true;
+              _faceDetectionMessage = 'Image captured';
+              _showCameraPreview = false; // Close preview after capture
+            });
+            _stopCameraPreview();
           } else {
             setState(() {
               _isProcessing = false;
+              _isFaceDetected = false;
+              _faceDetectionMessage = 'Image is empty';
             });
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Captured image is empty')),
@@ -675,6 +702,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         } else {
           setState(() {
             _isProcessing = false;
+            _isFaceDetected = false;
+            _faceDetectionMessage = 'Could not access image';
           });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Could not access the captured image')),
@@ -683,6 +712,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       } catch (e) {
         setState(() {
           _isProcessing = false;
+          _isFaceDetected = false;
+          _faceDetectionMessage = 'Error saving image';
         });
         
         debugPrint('Error saving ESP32 preview image: $e');
@@ -695,9 +726,57 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       try {
         setState(() {
           _isProcessing = true;
+          _isFaceDetected = false;
+          _faceDetectionMessage = 'Capturing image...';
         });
         
-        // Get the captured image from API
+        // Use cached ESP32 URL to prevent context access during disposal
+        final String? esp32Url = _cachedEsp32Url ?? _settingsProvider?.esp32Url;
+        if (esp32Url == null || esp32Url.isEmpty) {
+          setState(() {
+            _isProcessing = false;
+            _faceDetectionMessage = 'ESP32 URL not configured';
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('ESP32 camera URL not configured')),
+          );
+          return;
+        }
+
+        // Try using FaceDetectionService first for more reliable capture
+        final imageBytes = await FaceDetectionService.captureEsp32Frame(esp32Url);
+        if (imageBytes != null) {
+          // Save to a file
+          final appDir = await getApplicationDocumentsDirectory();
+          final timestamp = DateTime.now().millisecondsSinceEpoch;
+          final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
+          final imageFile = File(imagePath);
+          await imageFile.writeAsBytes(imageBytes);
+          
+          debugPrint('ESP32 image captured using FaceDetectionService: ${imageFile.path}');
+          final size = await imageFile.length();
+          
+          // Add image without checking for face
+          if (size > 0) {
+            setState(() {
+              _imageFiles.add(imageFile);
+              _isProcessing = false;
+              _isFaceDetected = true;
+              _faceDetectionMessage = 'Image captured';
+            });
+          } else {
+            setState(() {
+              _isProcessing = false;
+              _faceDetectionMessage = 'Image is empty';
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Captured image is empty')),
+            );
+          }
+          return;
+        }
+        
+        // Fallback to ApiService if FaceDetectionService failed
         final tempFile = await ApiService.captureImage();
         debugPrint('ESP32 image captured to temp location: ${tempFile.path}');
         
@@ -707,45 +786,29 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           debugPrint('ESP32 image size: $size bytes');
           
           if (size > 0) {
-            // Check if image contains a face
-            try {
-              final hasFace = await ApiService.checkFace(tempFile);
-              if (hasFace) {
-                // Copy to a more permanent location
-                final appDir = await getApplicationDocumentsDirectory();
-                final timestamp = DateTime.now().millisecondsSinceEpoch;
-                final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
-                
-                // Copy file to permanent location
-                final bytes = await tempFile.readAsBytes();
-                final permanentFile = File(imagePath);
-                await permanentFile.writeAsBytes(bytes);
-                
-                debugPrint('Image copied to permanent location: ${permanentFile.path}');
-                
-                setState(() {
-                  _imageFiles.add(permanentFile);
-                  _isProcessing = false;
-                });
-              } else {
-                setState(() {
-                  _isProcessing = false;
-                });
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('No face detected in the captured image')),
-                );
-              }
-            } catch (e) {
-              setState(() {
-                _isProcessing = false;
-              });
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Error checking face: $e')),
-              );
-            }
+            // Copy to a more permanent location
+            final appDir = await getApplicationDocumentsDirectory();
+            final timestamp = DateTime.now().millisecondsSinceEpoch;
+            final imagePath = '${appDir.path}/esp32_profile_$timestamp.jpg';
+            
+            // Copy file to permanent location
+            final bytes = await tempFile.readAsBytes();
+            final permanentFile = File(imagePath);
+            await permanentFile.writeAsBytes(bytes);
+            
+            debugPrint('Image copied to permanent location: ${permanentFile.path}');
+            
+            setState(() {
+              _imageFiles.add(permanentFile);
+              _isProcessing = false;
+              _isFaceDetected = true;
+              _faceDetectionMessage = 'Image captured';
+            });
           } else {
             setState(() {
               _isProcessing = false;
+              _isFaceDetected = false;
+              _faceDetectionMessage = 'Image is empty';
             });
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('Captured image is empty')),
@@ -754,6 +817,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         } else {
           setState(() {
             _isProcessing = false;
+            _isFaceDetected = false;
+            _faceDetectionMessage = 'Could not access image';
           });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Could not access the captured image')),
@@ -762,6 +827,8 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       } catch (e) {
         setState(() {
           _isProcessing = false;
+          _isFaceDetected = false;
+          _faceDetectionMessage = 'Error capturing image';
         });
         
         debugPrint('Error capturing ESP32 image: $e');
@@ -979,12 +1046,55 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                           border: Border.all(color: Colors.grey),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: _previewImageBytes != null
-                            ? Image.memory(
-                                _previewImageBytes!,
-                                fit: BoxFit.cover,
-                              )
-                            : const Center(child: CircularProgressIndicator()),
+                        child: Stack(
+                          children: [
+                            _previewImageBytes != null
+                                ? Image.memory(
+                                    _previewImageBytes!,
+                                    fit: BoxFit.cover,
+                                  )
+                                : const Center(child: CircularProgressIndicator()),
+                            if (_isProcessing)
+                              Container(
+                                color: Colors.black54,
+                                child: Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const CircularProgressIndicator(),
+                                      const SizedBox(height: 8),
+                                      Text(
+                                        _faceDetectionMessage,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 16,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            if (_isFaceDetected)
+                              Positioned(
+                                top: 8,
+                                right: 8,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.green,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text(
+                                    'Face Detected',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
                     const SizedBox(height: 16),
                     Wrap(

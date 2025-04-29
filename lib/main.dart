@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+import 'package:flutter/services.dart';
 import 'package:attendance/providers/auth_provider.dart';
 import 'package:attendance/providers/settings_provider.dart';
 import 'package:attendance/providers/profile_provider.dart';
@@ -15,9 +17,25 @@ import 'package:attendance/services/api_service.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Initialize API service before running the app
+  // Initialize ML Kit
+  try {
+    final faceDetector = FaceDetector(
+      options: FaceDetectorOptions(
+        enableClassification: true,
+        enableLandmarks: true,
+        enableTracking: true,
+        minFaceSize: 0.1,
+        performanceMode: FaceDetectorMode.accurate,
+      ),
+    );
+    // Test the detector to ensure it's properly initialized
+    await faceDetector.close();
+  } catch (e) {
+    print('Error initializing ML Kit: $e');
+  }
+  
+  // Initialize API Service
   await ApiService.initialize();
-  debugPrint('Main: API Service initialized');
   
   runApp(MyApp());
 }
