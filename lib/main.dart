@@ -72,6 +72,7 @@ class MyApp extends StatelessWidget {
           return MaterialApp(
             title: 'Attendance System',
             theme: AppTheme.lightTheme,
+            debugShowCheckedModeBanner: false,
             darkTheme: AppTheme.darkTheme,
             themeMode: settingsProvider.isDarkMode ? ThemeMode.dark : ThemeMode.light,
             home: Consumer<AuthProvider>(

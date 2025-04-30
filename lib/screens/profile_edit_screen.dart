@@ -87,6 +87,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     // Cache provider references for safer access during disposal
     _settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
     _cachedEsp32Url = _settingsProvider?.esp32Url;
+    
+    // Debug logs to check ESP32 URL
+    debugPrint('ProfileEditScreen: ESP32 URL from provider: ${_settingsProvider?.esp32Url}');
+    debugPrint('ProfileEditScreen: Cached ESP32 URL: $_cachedEsp32Url');
   }
   
   @override
@@ -232,14 +236,19 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   }
   
   Future<void> _toggleESP32Camera() async {
-    setState(() {
-      _showCameraPreview = !_showCameraPreview;
-    });
+    debugPrint('ProfileEditScreen: Toggling ESP32 camera preview, current state: $_showCameraPreview');
+    debugPrint('ProfileEditScreen: ESP32 URL: $_cachedEsp32Url');
     
     if (_showCameraPreview) {
-      await _startCameraPreview();
-    } else {
+      // If camera is currently showing, turn it off
       _stopCameraPreview();
+    } else {
+      // If camera is currently off, turn it on
+      setState(() {
+        _showCameraPreview = true;
+        _isLoadingPreview = true;
+      });
+      await _startCameraPreview();
     }
   }
   
@@ -249,12 +258,37 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     try {
       // Use cached ESP32 URL to prevent context access during disposal
       final String? esp32Url = _cachedEsp32Url ?? _settingsProvider?.esp32Url;
+      debugPrint('ProfileEditScreen: Starting camera preview with URL: $esp32Url');
+      
       if (esp32Url == null || esp32Url.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('ESP32 camera URL not configured. Please check settings.')),
         );
         setState(() {
           _showCameraPreview = false;
+          _isLoadingPreview = false;
+          _faceDetectionMessage = 'ESP32 URL not configured';
+        });
+        return;
+      }
+      
+      // Validate URL format
+      bool isValidUrl = false;
+      try {
+        final uri = Uri.parse(esp32Url);
+        isValidUrl = uri.isAbsolute && (uri.scheme == 'http' || uri.scheme == 'https');
+      } catch (e) {
+        isValidUrl = false;
+      }
+      
+      if (!isValidUrl) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid ESP32 camera URL format. Please check settings.')),
+        );
+        setState(() {
+          _showCameraPreview = false;
+          _isLoadingPreview = false;
+          _faceDetectionMessage = 'Invalid ESP32 URL format';
         });
         return;
       }
@@ -277,31 +311,39 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       setState(() {
         _isStreamActive = true;
         _isLoadingPreview = true;
+        _faceDetectionMessage = 'Connecting to ESP32 camera...';
       });
       
       try {
-        // Try direct image capture first for immediate feedback - use base URL
-        await _fetchSingleImage();
+        // Try direct image capture first for immediate feedback
+        final success = await _fetchSingleImage();
+        debugPrint('ProfileEditScreen: Initial image fetch result: $success');
         
-        // No need to try MJPEG streaming since it doesn't work
+        if (!success) {
+          throw Exception('Could not connect to ESP32 camera');
+        }
+        
         _fadeController.forward();
         
-        // Start image polling
+        // Start image polling regardless of initial fetch result
         _startImagePolling();
       } catch (e) {
-        debugPrint('Profile screen connection error: $e');
+        debugPrint('ProfileEditScreen: Connection error: $e');
         
         if (!mounted) return;
         
-        // Try a different approach
+        // Set error state
+        setState(() {
+          _faceDetectionMessage = 'Error connecting to ESP32 camera';
+          _isLoadingPreview = false;
+        });
+        
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Using alternative connection method')),
+          const SnackBar(content: Text('Error connecting to ESP32 camera. Please check the URL and try again.')),
         );
-        _startImagePolling();
-        _fadeController.forward();
       }
     } catch (e) {
-      debugPrint('Error in startCameraPreview: $e');
+      debugPrint('ProfileEditScreen: Error in startCameraPreview: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error connecting to camera: ${e.toString().split('\n')[0]}')),
@@ -309,6 +351,7 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         setState(() {
           _showCameraPreview = false;
           _isLoadingPreview = false;
+          _faceDetectionMessage = 'Error: $e';
         });
       }
     }
@@ -477,20 +520,29 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   void _startImagePolling() {
     if (!mounted || !_showCameraPreview) return;
     
-    debugPrint('Starting image polling for profile');
+    debugPrint('ProfileEditScreen: Starting image polling');
     // Clear any existing timer
     _previewTimer?.cancel();
     
     setState(() {
-      _isLoadingPreview = false;
+      _isLoadingPreview = true;
     });
     
     // Try to get first image immediately
-    _fetchSingleImage();
+    _fetchSingleImage().then((success) {
+      if (mounted) {
+        setState(() {
+          _isLoadingPreview = false;
+          if (!success) {
+            _faceDetectionMessage = 'Could not connect to ESP32 camera';
+          }
+        });
+      }
+    });
     
-    // Create a new timer to periodically fetch images
-    _previewTimer = Timer.periodic(const Duration(milliseconds: 750), (_) {
-      if (mounted && _showCameraPreview) {
+    // Create a new timer to periodically fetch images with a faster refresh rate
+    _previewTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
+      if (mounted && _showCameraPreview && !_isProcessing) {
         _fetchSingleImage();
       } else if (_previewTimer != null) {
         _previewTimer!.cancel();
@@ -521,13 +573,19 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     return bytes.length > 1000; // At least some reasonable size for an image
   }
   
-  Future<void> _fetchSingleImage() async {
-    if (!mounted || _isDisposing || !_showCameraPreview) return;
+  Future<bool> _fetchSingleImage() async {
+    if (!mounted || _isDisposing || !_showCameraPreview) return false;
     
     try {
       // Use cached ESP32 URL to prevent context access during disposal
       final String? esp32Url = _cachedEsp32Url ?? _settingsProvider?.esp32Url;
-      if (esp32Url == null || esp32Url.isEmpty) return;
+      
+      if (esp32Url == null || esp32Url.isEmpty) {
+        debugPrint('ProfileEditScreen: ESP32 URL is null or empty');
+        return false;
+      }
+      
+      debugPrint('ProfileEditScreen: Fetching image with ESP32 URL: $esp32Url');
       
       // Try different endpoints - prioritize /capture endpoint first based on reliability
       List<String> endpointsToTry = [];
@@ -560,13 +618,15 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         endpointsToTry.add('${esp32Url}/camera/snapshot');
       }
       
+      debugPrint('ProfileEditScreen: Trying endpoints: $endpointsToTry');
+      
       Exception? lastException;
       
       for (final url in endpointsToTry) {
         try {
-          if (!mounted || _isDisposing) return;
+          if (!mounted || _isDisposing) return false;
           
-          debugPrint('Profile screen: Fetching image from: $url');
+          debugPrint('ProfileEditScreen: Fetching image from: $url');
           
           // Request a single image from the camera with increased timeout
           final response = await http.get(
@@ -574,26 +634,28 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
           ).timeout(
             const Duration(seconds: 5), 
             onTimeout: () {
-              debugPrint('Profile screen: Image fetch timeout from $url');
+              debugPrint('ProfileEditScreen: Image fetch timeout from $url');
               throw TimeoutException('Image fetch timeout');
             },
           );
           
           if (response.statusCode == 200 && response.bodyBytes.length > 100) {
-            if (!mounted || _isDisposing || !_showCameraPreview) return;
+            if (!mounted || _isDisposing || !_showCameraPreview) return false;
             
             final imageBytes = response.bodyBytes;
-            debugPrint('Profile screen: Received image, size: ${imageBytes.length} bytes');
+            debugPrint('ProfileEditScreen: Received image, size: ${imageBytes.length} bytes');
             
             // Check Content-Type header (more reliable than guessing)
             final contentType = response.headers['content-type'] ?? '';
             final isImageContentType = contentType.toLowerCase().contains('image');
+            debugPrint('ProfileEditScreen: Content-Type: $contentType, isImageContentType: $isImageContentType');
             
             // Validate the image data with our custom validator
             final bool isValidImage = _isValidJpegImage(imageBytes);
+            debugPrint('ProfileEditScreen: isValidImage: $isValidImage');
                 
             if (isValidImage) {
-              debugPrint('Profile screen: Valid image detected from $url');
+              debugPrint('ProfileEditScreen: Valid image detected from $url');
               
               try {
                 // Update state with image data directly
@@ -609,21 +671,21 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                 });
                 
                 // Success, stop trying more endpoints
-                return;
+                return true;
               } catch (e) {
-                debugPrint('Profile screen: Error processing image: $e');
+                debugPrint('ProfileEditScreen: Error processing image: $e');
                 // If we get an error processing this image, try the next endpoint
                 continue;
               }
             } else {
-              debugPrint('Profile screen: Invalid image format from $url, skipping');
+              debugPrint('ProfileEditScreen: Invalid image format from $url, skipping');
               continue; // Try next endpoint
             }
           } else {
-            debugPrint('Profile screen: Invalid response from $url: ${response.statusCode}, size: ${response.bodyBytes.length}');
+            debugPrint('ProfileEditScreen: Invalid response from $url: ${response.statusCode}, size: ${response.bodyBytes.length}');
           }
         } catch (e) {
-          debugPrint('Profile screen: Error fetching from $url: $e');
+          debugPrint('ProfileEditScreen: Error fetching from $url: $e');
           lastException = e as Exception;
           // Try next endpoint
           continue;
@@ -631,10 +693,13 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
       }
       
       // If we get here, all endpoints failed
-      throw lastException ?? Exception('All endpoints failed');
+      debugPrint('ProfileEditScreen: All endpoints failed');
+      lastException = lastException ?? Exception('All endpoints failed');
+      return false;
     } catch (e) {
       // Silently fail during polling
-      debugPrint('Image polling error: $e');
+      debugPrint('ProfileEditScreen: Image polling error: $e');
+      return false;
     }
   }
   
@@ -664,22 +729,48 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
   }
   
   Widget _buildCameraPreview() {
-    if (_previewImageBytes == null) {
+    if (_isLoadingPreview) {
       return const Center(
-        child: Text('No preview available'),
+        child: CircularProgressIndicator(),
       );
     }
     
-    return Image.memory(
-      _previewImageBytes!,
-      fit: BoxFit.contain,
-      gaplessPlayback: true,
-      errorBuilder: (context, error, stackTrace) {
-        debugPrint('Error rendering preview image: $error');
-        return const Center(
-          child: Text('Error loading preview'),
-        );
-      },
+    if (_previewImageBytes == null) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.videocam_off, size: 48, color: Colors.grey),
+            SizedBox(height: 16),
+            Text('No preview available\nCheck ESP32 connection',
+                textAlign: TextAlign.center),
+          ],
+        ),
+      );
+    }
+    
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Image.memory(
+          _previewImageBytes!,
+          fit: BoxFit.contain,
+          gaplessPlayback: true,
+          errorBuilder: (context, error, stackTrace) {
+            debugPrint('Error rendering preview image: $error');
+            return const Center(
+              child: Text('Error loading preview'),
+            );
+          },
+        ),
+        if (_isProcessing)
+          Container(
+            color: Colors.black54,
+            child: const Center(
+              child: CircularProgressIndicator(),
+            ),
+          ),
+      ],
     );
   }
   
@@ -688,14 +779,21 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     
     setState(() {
       _isLoadingPreview = true;
+      _faceDetectionMessage = '';
     });
     
     try {
+      debugPrint('ProfileEditScreen: Refreshing ESP32 camera preview');
+      
       if (_cachedEsp32Url == null || _cachedEsp32Url!.isEmpty) {
         throw Exception('ESP32 URL not configured');
       }
       
       final bytes = await ApiService.getEsp32CameraPreview();
+      
+      if (bytes == null) {
+        throw Exception('Failed to get camera preview');
+      }
       
       if (mounted) {
         setState(() {
@@ -705,10 +803,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         });
       }
     } catch (e) {
-      debugPrint('Error refreshing preview: $e');
+      debugPrint('ProfileEditScreen: Error refreshing preview: $e');
       if (mounted) {
         setState(() {
           _isLoadingPreview = false;
+          _faceDetectionMessage = 'Error: $e';
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error refreshing preview: $e')),
@@ -727,6 +826,9 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     });
     
     try {
+      // First refresh the preview to get a fresh image
+      await _refreshPreview();
+      
       // Capture image from ESP32 camera
       final file = await ApiService.captureImage();
       
@@ -754,10 +856,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
         );
       }
     } catch (e) {
-      debugPrint('Error capturing from ESP32: $e');
+      debugPrint('ProfileEditScreen: Error capturing from ESP32: $e');
       setState(() {
         _isFaceDetected = false;
-        _faceDetectionMessage = 'Error: $e';
+        _faceDetectionMessage = 'Error: Failed to capture image';
       });
       
       ScaffoldMessenger.of(context).showSnackBar(
@@ -1039,7 +1141,11 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
     if (!_isDisposing) {
       _settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
       _cachedEsp32Url = _settingsProvider?.esp32Url;
+      debugPrint('ProfileEditScreen build: ESP32 URL from provider: ${_settingsProvider?.esp32Url}');
     }
+    
+    // Determine if we should show the ESP32 camera button
+    final bool showEsp32Button = (_cachedEsp32Url?.isNotEmpty ?? false);
     
     return Scaffold(
       appBar: AppBar(
@@ -1139,21 +1245,21 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Row(
+                    Wrap(
+                      spacing: 12.0, // horizontal spacing
+                      runSpacing: 12.0, // vertical spacing
                       children: [
                         ElevatedButton.icon(
                           onPressed: () => _pickImage(ImageSource.camera),
                           icon: const Icon(Icons.camera_alt),
                           label: const Text('Take Photo'),
                         ),
-                        const SizedBox(width: 16),
                         ElevatedButton.icon(
                           onPressed: () => _pickImage(ImageSource.gallery),
                           icon: const Icon(Icons.photo_library),
                           label: const Text('Gallery'),
                         ),
-                        const SizedBox(width: 16),
-                        if (Provider.of<SettingsProvider>(context).esp32Url?.isNotEmpty ?? false)
+                        if (showEsp32Button)
                           ElevatedButton.icon(
                             onPressed: _toggleESP32Camera,
                             icon: Icon(_showCameraPreview ? Icons.videocam_off : Icons.videocam),
@@ -1168,34 +1274,47 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                       Container(
                         height: 300,
                         width: double.infinity,
-                        margin: const EdgeInsets.all(16),
+                        margin: const EdgeInsets.symmetric(vertical: 16),
                         decoration: BoxDecoration(
                           border: Border.all(color: Colors.grey),
                           borderRadius: BorderRadius.circular(8),
                         ),
-                        child: FadeTransition(
-                          opacity: _fadeController,
-                          child: _isLoadingPreview
-                              ? const Center(child: CircularProgressIndicator())
-                              : _buildCameraPreview(),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(7),
+                          child: FadeTransition(
+                            opacity: _fadeController,
+                            child: _buildCameraPreview(),
+                          ),
                         ),
                       ),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      Wrap(
+                        spacing: 12.0,
+                        runSpacing: 12.0,
+                        alignment: WrapAlignment.center,
                         children: [
                           ElevatedButton.icon(
-                            onPressed: _captureFromESP32,
+                            onPressed: _isProcessing ? null : _captureFromESP32,
                             icon: const Icon(Icons.camera),
                             label: const Text('Capture'),
                           ),
-                          const SizedBox(width: 16),
                           ElevatedButton.icon(
-                            onPressed: _refreshPreview,
+                            onPressed: _isProcessing ? null : _refreshPreview,
                             icon: const Icon(Icons.refresh),
                             label: const Text('Refresh'),
                           ),
                         ],
                       ),
+                      if (_faceDetectionMessage.isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _faceDetectionMessage,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: _isFaceDetected ? Colors.green : Colors.red,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                       const SizedBox(height: 16),
                     ],
                     
@@ -1365,8 +1484,10 @@ class _ProfileEditScreenState extends State<ProfileEditScreen> with SingleTicker
                             ),
                           ),
                           const SizedBox(height: 16),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          Wrap(
+                            spacing: 12.0,
+                            runSpacing: 12.0,
+                            alignment: WrapAlignment.center,
                             children: [
                               ElevatedButton.icon(
                                 onPressed: _isRecordingVoice ? _stopRecording : _startRecording,

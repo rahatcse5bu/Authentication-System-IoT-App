@@ -37,7 +37,14 @@ class ApiService {
       
       // Try to load ESP32 URL from preferences
       _esp32Url = _sharedPreferences!.getString('esp32_url') ?? defaultEsp32Url;
-      debugPrint('ESP32 URL: $_esp32Url');
+      
+      // Ensure ESP32 URL is not empty
+      if (_esp32Url == null || _esp32Url!.isEmpty) {
+        _esp32Url = defaultEsp32Url;
+        await _sharedPreferences!.setString('esp32_url', _esp32Url!);
+      }
+      
+      debugPrint('ESP32 URL initialized to: $_esp32Url');
       
       // Test server connection
       await testServerConnection();
@@ -46,6 +53,8 @@ class ApiService {
       await _getAuthToken();
     } catch (e) {
       debugPrint('Error initializing ApiService: $e');
+      // Set default ESP32 URL if there was an error
+      _esp32Url = defaultEsp32Url;
     }
   }
 
@@ -88,25 +97,51 @@ class ApiService {
 
   // Configure ESP32 Camera URL
   static Future<void> setEsp32Url(String url) async {
+    debugPrint('ApiService: Setting ESP32 URL to: $url');
+    
+    // Ensure URL is not empty
+    if (url.isEmpty) {
+      url = defaultEsp32Url;
+      debugPrint('ApiService: Empty URL provided, using default: $url');
+    }
+    
     _esp32Url = url;
     final prefs = await _ensureSharedPreferences();
     await prefs.setString('esp32_url', url);
+    debugPrint('ApiService: ESP32 URL saved: $_esp32Url');
   }
 
   static String? get esp32Url => _esp32Url;
 
   // Authentication
   static Future<Map<String, dynamic>> login(String username, String password) async {
+    final url = '$_baseUrl/token/';
     debugPrint('Attempting login with username: $username');
+    
+    final payload = {
+      'username': username, 
+      'password': password
+    };
+    
     try {
-      final response = await http.post(
-        Uri.parse('$_baseUrl/token/'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'username': username, 'password': password}),
+      _logApiCall(
+        method: 'POST',
+        url: url,
+        payload: payload,
       );
       
-      debugPrint('Login response status code: ${response.statusCode}');
-      debugPrint('Login response body: ${response.body}');
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(payload),
+      );
+      
+      _logApiCall(
+        method: 'POST',
+        url: url,
+        response: response,
+        statusCode: response.statusCode,
+      );
       
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -124,6 +159,12 @@ class ApiService {
         throw Exception('Failed to login: ${response.body}');
       }
     } catch (e) {
+      _logApiCall(
+        method: 'POST',
+        url: url,
+        payload: payload,
+        error: e.toString(),
+      );
       debugPrint('Login error: $e');
       throw Exception('Login error: $e');
     }
@@ -138,16 +179,19 @@ class ApiService {
 
   // Profile Management
   static Future<List<Profile>> getProfiles() async {
+    final url = '$_baseUrl/profiles/';
     debugPrint('getProfiles: Fetching all profiles');
-    debugPrint('getProfiles: Using base URL: $_baseUrl');
-    debugPrint('getProfiles: Auth token: ${_token != null ? "Present" : "Missing"}');
     
     try {
-      final uri = Uri.parse('$_baseUrl/profiles/');
+      final uri = Uri.parse(url);
       debugPrint('getProfiles: Full URL: $uri');
       
       final headers = _getAuthHeaders();
-      debugPrint('getProfiles: Request headers: $headers');
+      
+      _logApiCall(
+        method: 'GET',
+        url: url,
+      );
       
       final response = await http.get(uri, headers: headers)
           .timeout(const Duration(seconds: 10), onTimeout: () {
@@ -155,9 +199,12 @@ class ApiService {
             throw TimeoutException('Request timed out');
           });
 
-      debugPrint('getProfiles: Response status: ${response.statusCode}');
-      debugPrint('getProfiles: Response headers: ${response.headers}');
-      debugPrint('getProfiles: Response body: ${response.body}');
+      _logApiCall(
+        method: 'GET',
+        url: url,
+        response: response,
+        statusCode: response.statusCode,
+      );
 
       if (response.statusCode == 200) {
         try {
@@ -179,6 +226,12 @@ class ApiService {
         throw Exception('Failed to load profiles: ${response.body}');
       }
     } catch (e) {
+      _logApiCall(
+        method: 'GET',
+        url: url,
+        error: e.toString(),
+      );
+      
       debugPrint('getProfiles: Network error: $e');
       if (e is SocketException) {
         throw Exception('Network error: Could not connect to server. Check if the server is running and accessible.');
@@ -502,6 +555,8 @@ class ApiService {
 
   // This is the fixed method for face recognition attendance
   static Future<Map<String, dynamic>> markAttendanceWithFaceRecognition(File imageFile, String? esp32Url) async {
+    final url = '$_baseUrl/attendance/mark_attendance/';
+    
     try {
       debugPrint('markAttendanceWithFaceRecognition: Delegating to ApiServiceFix');
       final token = await _getAuthToken();
@@ -514,9 +569,37 @@ class ApiService {
       // Log token format (first few characters)
       debugPrint('markAttendanceWithFaceRecognition: Using token format: ${token.length > 5 ? token.substring(0, 5) + "..." : token}');
       
+      // Log the request details
+      _logApiCall(
+        method: 'POST (Face Recognition)',
+        url: url,
+        payload: {
+          'verification_method': 'face',
+          'image_file_path': imageFile.path,
+          'esp32_url': esp32Url ?? 'Not provided',
+          'token_prefix': token.substring(0, token.length > 10 ? 10 : token.length) + '...',
+        },
+      );
+      
       // Use the fixed implementation that tries multiple endpoints
-      return await ApiServiceFix.markAttendanceWithFaceRecognition(imageFile, esp32Url, token);
+      final result = await ApiServiceFix.markAttendanceWithFaceRecognition(imageFile, esp32Url, token);
+      
+      // Log the response
+      _logApiCall(
+        method: 'POST (Face Recognition)',
+        url: url,
+        response: result,
+      );
+      
+      return result;
     } catch (e) {
+      // Log the error
+      _logApiCall(
+        method: 'POST (Face Recognition)',
+        url: url,
+        error: e.toString(),
+      );
+      
       debugPrint('markAttendanceWithFaceRecognition error: $e');
       rethrow;
     }
@@ -592,14 +675,26 @@ class ApiService {
           if (response.statusCode == 200 && response.bodyBytes.length > 100) {
             // Check if data looks like an image
             if (_isValidImage(response.bodyBytes)) {
-              // Save the image to application documents directory for better persistence
-              final appDir = await getApplicationDocumentsDirectory();
-              final timestamp = DateTime.now().millisecondsSinceEpoch;
-              final imageFile = File('${appDir.path}/esp32_captured_$timestamp.jpg');
-              await imageFile.writeAsBytes(response.bodyBytes);
-              
-              debugPrint('captureImage: Image saved to ${imageFile.path}, size: ${response.bodyBytes.length} bytes');
-              return imageFile;
+              try {
+                // Save the image to application documents directory for better persistence
+                final appDir = await getApplicationDocumentsDirectory();
+                final timestamp = DateTime.now().millisecondsSinceEpoch;
+                final imageFile = File('${appDir.path}/esp32_captured_$timestamp.jpg');
+                await imageFile.writeAsBytes(response.bodyBytes);
+                
+                debugPrint('captureImage: Image saved to ${imageFile.path}, size: ${response.bodyBytes.length} bytes');
+                return imageFile;
+              } catch (e) {
+                debugPrint('captureImage: Error saving image: $e');
+                
+                // Fallback for web platform or if saving fails
+                final tempDir = await getTemporaryDirectory();
+                final timestamp = DateTime.now().millisecondsSinceEpoch;
+                final imageFile = File('${tempDir.path}/esp32_temp_$timestamp.jpg');
+                await imageFile.writeAsBytes(response.bodyBytes);
+                debugPrint('captureImage: Image saved to temp directory: ${imageFile.path}');
+                return imageFile;
+              }
             } else {
               debugPrint('captureImage: Invalid image data from $url');
               continue; // Try next endpoint
@@ -847,12 +942,21 @@ class ApiService {
     return _getToken();
   }
 
-  // Get the latest image from ESP32 camera for preview
+  /**
+   * Gets a preview image from the ESP32 camera.
+   * 
+   * This method tries different endpoints in order to get a valid image from the ESP32 camera.
+   * It will attempt to connect to various common ESP32 camera endpoints until it finds one that works.
+   * 
+   * @return A Uint8List containing the image bytes if successful, null otherwise.
+   */
   static Future<Uint8List?> getEsp32CameraPreview() async {
     if (_esp32Url == null || _esp32Url!.isEmpty) {
       debugPrint('getEsp32CameraPreview: ESP32 URL not configured');
       return null;
     }
+    
+    debugPrint('getEsp32CameraPreview: Attempting to get preview from: $_esp32Url');
     
     // List of endpoints to try in order of preference
     List<String> endpointsToTry = [];
@@ -885,29 +989,76 @@ class ApiService {
       endpointsToTry.add('${_esp32Url}/camera/snapshot');
     }
     
+    // Add ESP-CAM specific endpoints
+    if (_esp32Url!.endsWith("/")) {
+      endpointsToTry.add('${_esp32Url}cam-hi.jpg');
+      endpointsToTry.add('${_esp32Url}cam-lo.jpg');
+      endpointsToTry.add('${_esp32Url}cam.jpg');
+      endpointsToTry.add('${_esp32Url}snapshot.jpg');
+    } else {
+      endpointsToTry.add('${_esp32Url}/cam-hi.jpg');
+      endpointsToTry.add('${_esp32Url}/cam-lo.jpg');
+      endpointsToTry.add('${_esp32Url}/cam.jpg');
+      endpointsToTry.add('${_esp32Url}/snapshot.jpg');
+    }
+    
+    debugPrint('getEsp32CameraPreview: Trying endpoints: $endpointsToTry');
+    
+    Exception? lastException;
+    
     for (final url in endpointsToTry) {
       try {
         debugPrint('getEsp32CameraPreview: Fetching image from: $url');
         
+        _logApiCall(
+          method: 'GET',
+          url: url,
+        );
+        
         final response = await http.get(Uri.parse(url))
-          .timeout(const Duration(seconds: 5), onTimeout: () {
+          .timeout(const Duration(seconds: 3), onTimeout: () {
             debugPrint('getEsp32CameraPreview: Timeout on $url');
             throw TimeoutException('Preview timeout');
           });
         
+        // Log response status and headers but not the binary image data
+        _logApiCall(
+          method: 'GET',
+          url: url,
+          statusCode: response.statusCode,
+        );
+        
         if (response.statusCode == 200 && response.bodyBytes.length > 100) {
-          debugPrint('getEsp32CameraPreview: Successfully received image from $url, size: ${response.bodyBytes.length} bytes');
-          return response.bodyBytes;
+          // Check Content-Type header (more reliable than guessing)
+          final contentType = response.headers['content-type'] ?? '';
+          final isImageContentType = contentType.toLowerCase().contains('image');
+          
+          // Validate the image data with custom validator
+          final bool isValidImage = _isValidImage(response.bodyBytes);
+          
+          if (isValidImage || isImageContentType) {
+            debugPrint('getEsp32CameraPreview: Successfully received image from $url, size: ${response.bodyBytes.length} bytes');
+            return response.bodyBytes;
+          } else {
+            debugPrint('getEsp32CameraPreview: Received data does not appear to be a valid image from $url');
+          }
         } else {
           debugPrint('getEsp32CameraPreview: Invalid response from $url: ${response.statusCode}, body size: ${response.bodyBytes.length}');
         }
       } catch (e) {
+        _logApiCall(
+          method: 'GET',
+          url: url,
+          error: e.toString(),
+        );
+        
         debugPrint('getEsp32CameraPreview: Error fetching from $url: $e');
+        lastException = e as Exception;
         // Continue to next endpoint
       }
     }
     
-    debugPrint('getEsp32CameraPreview: All endpoints failed');
+    debugPrint('getEsp32CameraPreview: All endpoints failed. Last error: $lastException');
     return null;
   }
 
@@ -1097,10 +1248,22 @@ class ApiService {
       request.fields['university'] = university;
       request.fields['blood_group'] = bloodGroup;
       
-      // Add the image file
-      request.files.add(await http.MultipartFile.fromPath(
+      // Add the image file as both 'image' and 'face_images'
+      final imageBytes = await imageFile.readAsBytes();
+      
+      // Add as 'image' for backward compatibility
+      request.files.add(http.MultipartFile.fromBytes(
         'image', 
-        imageFile.path,
+        imageBytes,
+        filename: imageFile.path.split('/').last,
+        contentType: MediaType('image', 'jpeg'),
+      ));
+      
+      // Also add as 'face_images' which is required by the server
+      request.files.add(http.MultipartFile.fromBytes(
+        'face_images', 
+        imageBytes,
+        filename: imageFile.path.split('/').last,
         contentType: MediaType('image', 'jpeg'),
       ));
       
@@ -1132,6 +1295,8 @@ class ApiService {
 
   // Mark attendance with voice only
   static Future<Map<String, dynamic>> markAttendanceWithVoice(File voiceFile) async {
+    final url = '$_baseUrl/attendance/mark_attendance/';
+    
     try {
       debugPrint('markAttendanceWithVoice: Marking attendance with voice');
       final token = await _getAuthToken();
@@ -1144,7 +1309,7 @@ class ApiService {
       // Create a multipart request
       final request = http.MultipartRequest(
         'POST',
-        Uri.parse('$_baseUrl/attendance/mark_attendance/'),
+        Uri.parse(url),
       );
       
       // Add auth headers
@@ -1152,6 +1317,17 @@ class ApiService {
       
       // Add verification method
       request.fields['verification_method'] = 'voice';
+      
+      // Log request information
+      _logApiCall(
+        method: 'POST (Multipart)',
+        url: url,
+        payload: {
+          'verification_method': 'voice',
+          'voice_file_path': voiceFile.path,
+          'token': '${token.substring(0, 10)}...',
+        },
+      );
       
       // Add the voice file
       request.files.add(await http.MultipartFile.fromPath(
@@ -1161,11 +1337,19 @@ class ApiService {
       ));
       
       // Send the request
-      final response = await request.send();
-      final responseBody = await response.stream.bytesToString();
+      final streamedResponse = await request.send();
+      final response = await http.Response.fromStream(streamedResponse);
+      
+      // Log response
+      _logApiCall(
+        method: 'POST (Multipart)',
+        url: url,
+        response: response,
+        statusCode: response.statusCode,
+      );
       
       if (response.statusCode == 200 || response.statusCode == 201) {
-        final Map<String, dynamic> responseData = jsonDecode(responseBody);
+        final Map<String, dynamic> responseData = jsonDecode(response.body);
         debugPrint('markAttendanceWithVoice: Success');
         
         // Process the response
@@ -1197,9 +1381,20 @@ class ApiService {
           };
         }
       } else {
-        throw Exception('Failed to mark attendance: $responseBody');
+        _logApiCall(
+          method: 'POST (Multipart)',
+          url: url,
+          error: 'Failed with status code: ${response.statusCode}',
+        );
+        throw Exception('Failed to mark attendance: ${response.body}');
       }
     } catch (e) {
+      _logApiCall(
+        method: 'POST (Multipart)',
+        url: url,
+        error: e.toString(),
+      );
+      
       debugPrint('markAttendanceWithVoice error: $e');
       throw Exception('Error marking attendance with voice: $e');
     }
@@ -1354,5 +1549,56 @@ class ApiService {
       debugPrint('addFaceImage error: $e');
       throw Exception('Error adding face image: $e');
     }
+  }
+
+  // Helper method to log API requests and responses
+  static void _logApiCall({
+    required String method,
+    required String url,
+    Map<String, dynamic>? payload,
+    dynamic response,
+    int? statusCode,
+    String? error,
+  }) {
+    debugPrint('\n=== API CALL DEBUG ===');
+    debugPrint('🔷 METHOD: $method');
+    debugPrint('🔷 URL: $url');
+    
+    if (payload != null) {
+      try {
+        final jsonPayload = jsonEncode(payload);
+        debugPrint('🔷 PAYLOAD: $jsonPayload');
+      } catch (e) {
+        debugPrint('🔷 PAYLOAD: $payload (Could not encode to JSON: $e)');
+      }
+    }
+    
+    if (statusCode != null) {
+      debugPrint('🔷 STATUS CODE: $statusCode');
+    }
+    
+    if (response != null) {
+      try {
+        if (response is String) {
+          debugPrint('🔷 RESPONSE: $response');
+        } else if (response is http.Response) {
+          debugPrint('🔷 RESPONSE CODE: ${response.statusCode}');
+          debugPrint('🔷 RESPONSE HEADERS: ${response.headers}');
+          debugPrint('🔷 RESPONSE BODY: ${response.body}');
+        } else {
+          final jsonResponse = jsonEncode(response);
+          debugPrint('🔷 RESPONSE: $jsonResponse');
+        }
+      } catch (e) {
+        debugPrint('🔷 RESPONSE: Could not format response: $e');
+        debugPrint('🔷 RAW RESPONSE: $response');
+      }
+    }
+    
+    if (error != null) {
+      debugPrint('🔶 ERROR: $error');
+    }
+    
+    debugPrint('=== END API CALL DEBUG ===\n');
   }
 }

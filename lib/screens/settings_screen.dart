@@ -46,6 +46,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
         throw Exception('Please enter a URL');
       }
       
+      // Validate URL format
+      bool isValidUrl = false;
+      try {
+        final uri = Uri.parse(url);
+        isValidUrl = uri.isAbsolute && (uri.scheme == 'http' || uri.scheme == 'https');
+      } catch (e) {
+        isValidUrl = false;
+      }
+      
+      if (!isValidUrl) {
+        throw Exception('Invalid URL format. Please enter a valid HTTP or HTTPS URL.');
+      }
+      
       debugPrint('Testing ESP32 connection to URL: $url');
       
       // Save the URL temporarily for testing
@@ -53,7 +66,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await Provider.of<SettingsProvider>(context, listen: false).setEsp32Url(url);
       
       try {
-        // Use the actual API test endpoint
+        // First try to directly fetch an image from the URL
+        final previewBytes = await ApiService.getEsp32CameraPreview();
+        
+        if (previewBytes != null && previewBytes.isNotEmpty) {
+          setState(() {
+            _testResult = 'Connection successful! Received image data from ESP32 camera.';
+            _isTesting = false;
+          });
+          return;
+        }
+        
+        // If direct image fetch failed, use the actual API test endpoint
         final result = await ApiService.testEsp32Connection(url);
         debugPrint('Test connection result: $result');
         

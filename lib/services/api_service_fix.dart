@@ -11,19 +11,58 @@ import '../utils/constants.dart';
 class ApiServiceFix {
   static String get _baseUrl => Constants.baseApiUrl;
 
+  // Helper method to log requests and responses
+  static void _logDebug(String message) {
+    debugPrint('📡 ApiServiceFix: $message');
+  }
+  
+  // Detailed logging of request details
+  static void _logRequestDetails(String endpoint, Map<String, String> headers, Map<String, String> fields, String filePath) {
+    _logDebug('=== REQUEST DETAILS ===');
+    _logDebug('🔷 ENDPOINT: $endpoint');
+    _logDebug('🔷 HEADERS: ${jsonEncode(headers)}');
+    _logDebug('🔷 FIELDS: ${jsonEncode(fields)}');
+    _logDebug('🔷 FILE: $filePath');
+    _logDebug('=====================');
+  }
+  
+  // Detailed logging of response
+  static void _logResponseDetails(String endpoint, int statusCode, String body) {
+    _logDebug('=== RESPONSE DETAILS ===');
+    _logDebug('🔷 ENDPOINT: $endpoint');
+    _logDebug('🔷 STATUS: $statusCode');
+    
+    // Try to parse and format JSON response for better readability
+    try {
+      final jsonResponse = jsonDecode(body);
+      _logDebug('🔷 BODY: ${const JsonEncoder.withIndent('  ').convert(jsonResponse)}');
+    } catch (e) {
+      // If not valid JSON, log as-is
+      _logDebug('🔷 BODY: $body');
+    }
+    
+    _logDebug('======================');
+  }
+
   // Try different endpoints for face recognition attendance marking
   static Future<Map<String, dynamic>> markAttendanceWithFaceRecognition(
       File imageFile, String? esp32Url, String? token) async {
     try {
-      debugPrint('FixedAttendance: Starting face recognition process');
+      _logDebug('Starting face recognition process');
       
       if (token == null) {
+        _logDebug('❌ ERROR: Authentication token is missing');
         throw Exception('Authentication token is missing');
       }
       
       if (!await imageFile.exists()) {
+        _logDebug('❌ ERROR: Image file does not exist: ${imageFile.path}');
         throw Exception('Image file does not exist: ${imageFile.path}');
       }
+      
+      // Get file size and basic info
+      final fileSize = await imageFile.length();
+      _logDebug('Image file: ${imageFile.path}, Size: ${(fileSize / 1024).toStringAsFixed(2)} KB');
       
       // List of endpoints to try, in order of preference
       final List<String> endpointsToTry = [
@@ -34,36 +73,58 @@ class ApiServiceFix {
         '$_baseUrl/attendance/',
       ];
       
+      _logDebug('Will try these endpoints in order: $endpointsToTry');
+      
       Exception? lastException;
       
       // Try each endpoint until one works
       for (final endpoint in endpointsToTry) {
         try {
           final uri = Uri.parse(endpoint);
-          debugPrint('FixedAttendance: Trying endpoint: $uri');
+          _logDebug('Trying endpoint: $uri');
           
           final request = http.MultipartRequest('POST', uri);
           
           // Add headers - Using Bearer format for JWT tokens
-          request.headers.addAll({
+          final Map<String, String> headers = {
             'Authorization': 'Bearer $token',
-          });
+          };
+          request.headers.addAll(headers);
+          
+          // Prepare fields dictionary for detailed logging
+          final Map<String, String> fields = {};
           
           // Add required fields - add 'field' parameter that seems to be required
           if (esp32Url != null && esp32Url.isNotEmpty) {
+            fields['esp32_url'] = esp32Url;
+            fields['esp32_camera_url'] = esp32Url;
             request.fields['esp32_url'] = esp32Url;
             request.fields['esp32_camera_url'] = esp32Url;
           }
           
+          // Add verification method field for clarity
+          fields['verification_method'] = 'face';
+          request.fields['verification_method'] = 'face';
+          
           // Add basic required fields (these might be expected by the API)
-          request.fields['timestamp'] = DateTime.now().toIso8601String();
-          request.fields['request_id'] = DateTime.now().millisecondsSinceEpoch.toString();
+          final timestamp = DateTime.now().toIso8601String();
+          fields['timestamp'] = timestamp;
+          request.fields['timestamp'] = timestamp;
+          
+          final requestId = DateTime.now().millisecondsSinceEpoch.toString();
+          fields['request_id'] = requestId;
+          request.fields['request_id'] = requestId;
           
           // Add the required 'profile' field
+          fields['profile'] = 'auto_detect';
           request.fields['profile'] = 'auto_detect'; // This field is required by the API
+          
+          // Log request details before sending
+          _logRequestDetails(endpoint, headers, fields, imageFile.path);
           
           // Add image file (only with 'image' field name as specified in API docs)
           final bytes = await imageFile.readAsBytes();
+          _logDebug('Read ${bytes.length} bytes from image file');
           
           request.files.add(http.MultipartFile.fromBytes(
             'image',
@@ -73,30 +134,29 @@ class ApiServiceFix {
           ));
           
           // Send request
-          debugPrint('FixedAttendance: Sending request to $uri');
+          _logDebug('Sending request to $uri');
           final streamedResponse = await request.send();
           final response = await http.Response.fromStream(streamedResponse);
           
-          debugPrint('FixedAttendance: Response status: ${response.statusCode}');
-          debugPrint('FixedAttendance: Response body: ${response.body}');
+          // Log full response details
+          _logResponseDetails(endpoint, response.statusCode, response.body);
           
           // If successful, parse the new response format
           if (response.statusCode == 200 || response.statusCode == 201) {
-            debugPrint('FixedAttendance: Success with endpoint $endpoint');
-            debugPrint('FixedAttendance: Full response body: ${response.body}');
+            _logDebug('✅ SUCCESS with endpoint $endpoint');
             
             // Try to parse the response JSON to get profile information
             try {
               final Map<String, dynamic> responseData = jsonDecode(response.body);
               
               // Log all keys in the response for debugging
-              debugPrint('FixedAttendance: Response keys: ${responseData.keys.toList()}');
+              _logDebug('Response keys: ${responseData.keys.toList()}');
               
               // The new API returns results as an array
               if (responseData.containsKey('results') && responseData['results'] is List) {
                 // Check if the results array is empty
                 if (responseData['results'].isEmpty) {
-                  debugPrint('FixedAttendance: Warning - Results array is empty. This might be a backend issue.');
+                  _logDebug('⚠️ Warning - Results array is empty. This might be a backend issue.');
                   
                   // Return a special response indicating empty results
                   return {
@@ -120,7 +180,7 @@ class ApiServiceFix {
                 final double confidence = firstResult['confidence'] is num ? (firstResult['confidence'] as num).toDouble() : 0.0;
                 final String profileImage = firstResult['image'] ?? '';
                 
-                debugPrint('FixedAttendance: Attendance marked for $profileName ($regNumber) with $confidence% confidence');
+                _logDebug('✅ Attendance marked for $profileName ($regNumber) with $confidence% confidence');
                 
                 return {
                   'success': true,
@@ -148,7 +208,7 @@ class ApiServiceFix {
                                         responseData['registration_number'] ??
                                         '';
                 
-                debugPrint('FixedAttendance: Attendance marked for $profileName ($regNumber) using old format');
+                _logDebug('✅ Attendance marked for $profileName ($regNumber) using old format');
                 
                 return {
                   'success': true,
@@ -159,7 +219,7 @@ class ApiServiceFix {
                 };
               }
             } catch (parseError) {
-              debugPrint('FixedAttendance: Could not parse profile info: $parseError');
+              _logDebug('⚠️ Could not parse profile info: $parseError');
               // Return success with limited info if we can't parse the response
               return {
                 'success': true,
@@ -175,7 +235,7 @@ class ApiServiceFix {
               // For 400 Bad Request, try to parse the error message to find the missing field
               try {
                 final errorData = jsonDecode(response.body);
-                debugPrint('FixedAttendance: 400 error details: $errorData');
+                _logDebug('❌ 400 error details: $errorData');
                 
                 // If the error contains field validation errors
                 if (errorData is Map) {
@@ -190,6 +250,7 @@ class ApiServiceFix {
                   });
                   
                   if (missingFields.isNotEmpty) {
+                    _logDebug('❌ Missing required fields: ${missingFields.join(", ")}');
                     lastException = Exception('Missing required fields: ${missingFields.join(", ")}');
                     continue;
                   }
@@ -197,41 +258,47 @@ class ApiServiceFix {
                 
                 // If we couldn't determine specific fields
                 if (response.body.toLowerCase().contains('no face')) {
+                  _logDebug('❌ No face detected in the image');
                   throw Exception('No face detected in the image. Please try again with a clearer image.');
                 } else {
+                  _logDebug('❌ Bad request: ${response.body}');
                   lastException = Exception('Bad request: ${response.body}');
                   continue;
                 }
               } catch (e) {
+                _logDebug('❌ Bad request (parse error): ${response.body}');
                 lastException = Exception('Bad request: ${response.body}');
                 continue;
               }
             } else if (response.statusCode == 404 && response.body.toLowerCase().contains('not recognized')) {
+              _logDebug('❌ Face not recognized');
               throw Exception('Face not recognized. Please register your profile first.');
             } else if (response.statusCode == 401) {
-              debugPrint('FixedAttendance: Authentication failed. Token: ${token.length > 10 ? token.substring(0, 10) + "..." : token}');
+              _logDebug('❌ Authentication failed. Token: ${token.length > 10 ? token.substring(0, 10) + "..." : token}');
               lastException = Exception('Authentication failed: ${response.statusCode}, ${response.body}');
               continue;
             } else {
               // Store exception but continue trying other endpoints
+              _logDebug('❌ Failed with endpoint $endpoint: ${response.statusCode}, ${response.body}');
               lastException = Exception('Failed with endpoint $endpoint: ${response.statusCode}, ${response.body}');
               continue;
             }
           }
           
           // If 405, try the next endpoint
-          debugPrint('FixedAttendance: Method not allowed for endpoint $endpoint, trying next...');
+          _logDebug('⚠️ Method not allowed for endpoint $endpoint, trying next...');
         } catch (e) {
-          debugPrint('FixedAttendance: Error with endpoint $endpoint: $e');
+          _logDebug('❌ Error with endpoint $endpoint: $e');
           lastException = e is Exception ? e : Exception(e.toString());
           // Continue to next endpoint
         }
       }
       
       // If we get here, all endpoints failed
+      _logDebug('❌ All attendance endpoints failed');
       throw lastException ?? Exception('All attendance endpoints failed');
     } catch (e) {
-      debugPrint('FixedAttendance error: $e');
+      _logDebug('❌ Fatal error: $e');
       rethrow;
     }
   }
